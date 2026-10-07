@@ -1,0 +1,476 @@
+import express from "express";
+import { z } from "zod";
+import {
+  randomBytes,
+  randomUUID,
+  scryptSync,
+  timingSafeEqual,
+  createHash,
+} from "node:crypto";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createStore } from "./store.js";
+import { createBilling, request } from "./billing.js";
+import {
+  clientSchema,
+  planSchema,
+  ruleSchema,
+  FIELDS,
+  today,
+  render,
+} from "./domain.js";
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+export function createApp(
+  dir = process.env.DATA_DIR || resolve(root, "data"),
+  http = request,
+  setupSecret = process.env.SETUP_TOKEN || "",
+) {
+  const app = express(),
+    store = createStore(dir),
+    billing = createBilling(store, http),
+    sessions = new Map(),
+    attempts = new Map();
+  app.disable("x-powered-by");
+  app.get("/healthz", (req, res) => {
+    store.db.prepare("SELECT 1").get();
+    res.json({ status: "ok" });
+  });
+  app.use(express.json({ limit: "64kb" }));
+  app.use((req, res, next) => {
+    res.set({
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY",
+      "Referrer-Policy": "no-referrer",
+      "Content-Security-Policy":
+        "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    });
+    next();
+  });
+  app.use("/api", (req, res, next) => {
+    res.set("Cache-Control", "no-store");
+    if (req.method !== "GET" && req.get("origin")) {
+      try {
+        if (new URL(req.get("origin")).host !== req.get("host"))
+          return res.status(403).json({ error: "Origem inválida" });
+      } catch {
+        return res.sendStatus(403);
+      }
+    }
+    next();
+  });
+  const token = (req) =>
+    (req.headers.cookie || "")
+      .split(";")
+      .map((v) => v.trim())
+      .find((v) => v.startsWith("zap_session="))
+      ?.slice(12);
+  const authenticated = (req) => {
+    const t = token(req),
+      session = sessions.get(t);
+    if (!session || session < Date.now()) {
+      sessions.delete(t);
+      return false;
+    }
+    return true;
+  };
+  app.get("/api/auth", (req, res) =>
+    res.json({
+      setup: !store.get("auth", "admin"),
+      setupTokenRequired: !store.get("auth", "admin") && !!setupSecret,
+      authenticated: authenticated(req),
+    }),
+  );
+  app.post("/api/auth", (req, res) => {
+    const ip = req.ip,
+      entry = attempts.get(ip) || { n: 0, until: Date.now() + 900000 };
+    if (entry.until < Date.now()) {
+      entry.n = 0;
+      entry.until = Date.now() + 900000;
+    }
+    entry.n++;
+    attempts.set(ip, entry);
+    if (entry.n > 10)
+      return res
+        .status(429)
+        .json({ error: "Muitas tentativas. Aguarde 15 minutos." });
+    const { password, setupToken } = z
+      .object({
+        password: z.string().min(10, "Use pelo menos 10 caracteres").max(200),
+        setupToken: z.string().max(200).optional(),
+      })
+      .parse(req.body);
+    let admin = store.get("auth", "admin");
+    if (!admin) {
+      if (
+        setupSecret &&
+        !timingSafeEqual(
+          createHash("sha256").update(setupSecret).digest(),
+          createHash("sha256")
+            .update(setupToken || "")
+            .digest(),
+        )
+      )
+        return res
+          .status(403)
+          .json({ error: "Código de configuração inválido" });
+      if (
+        !setupSecret &&
+        (process.env.NODE_ENV === "production" ||
+          !["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.ip))
+      )
+        return res
+          .status(403)
+          .json({
+            error:
+              "Configure SETUP_TOKEN no servidor para liberar o primeiro acesso",
+          });
+      const salt = randomBytes(16).toString("hex");
+      admin = { salt, hash: scryptSync(password, salt, 64).toString("hex") };
+      store.put("auth", "admin", admin);
+    }
+    if (
+      !timingSafeEqual(
+        scryptSync(password, admin.salt, 64),
+        Buffer.from(admin.hash, "hex"),
+      )
+    )
+      return res.status(401).json({ error: "Senha incorreta" });
+    attempts.delete(ip);
+    for (const [key, value] of sessions)
+      if (value < Date.now()) sessions.delete(key);
+    const id = randomBytes(32).toString("hex");
+    sessions.set(id, Date.now() + 43200000);
+    res.set(
+      "Set-Cookie",
+      `zap_session=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${process.env.COOKIE_SECURE === "true" ? "; Secure" : ""}`,
+    );
+    res.json({ ok: true });
+  });
+  app.use("/api", (req, res, next) =>
+    authenticated(req)
+      ? next()
+      : res.status(401).json({ error: "Entre para continuar" }),
+  );
+  app.post("/api/logout", (req, res) => {
+    sessions.delete(token(req));
+    res.set(
+      "Set-Cookie",
+      "zap_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+    );
+    res.json({ ok: true });
+  });
+  const safeSettings = () => {
+    const s = store.settings();
+    return { ...s, uazapiToken: undefined, tokenConfigured: !!s.uazapiToken };
+  };
+  app.get("/api/state", (req, res) =>
+    res.json({
+      today: today(),
+      clients: store.all("clients"),
+      plans: store.all("plans"),
+      rules: store.all("rules").sort((a, b) => a.offset - b.offset),
+      invoices: store.invoices(),
+      deliveries: store.deliveries(),
+      logs: store.logs(),
+      settings: safeSettings(),
+      fields: FIELDS,
+    }),
+  );
+  function validateRule(data, id) {
+    if (
+      data.active &&
+      store
+        .all("rules")
+        .some((r) => r.id !== id && r.active && r.offset === data.offset)
+    )
+      throw new Error(
+        "Já existe um lembrete ativo nesse dia. Escolha outro intervalo ou pause o anterior.",
+      );
+  }
+  for (const [kind, schema] of [
+    ["clients", clientSchema],
+    ["plans", planSchema],
+    ["rules", ruleSchema],
+  ]) {
+    app.post("/api/" + kind, (req, res) => {
+      const parsed = schema.parse(req.body);
+      const id = req.body.id
+        ? z.string().uuid().parse(req.body.id)
+        : randomUUID();
+      if (req.body.id && !store.get(kind, id))
+        return res.status(404).json({ error: "Registro não encontrado" });
+      if (kind === "plans" && !store.get("clients", parsed.clientId))
+        return res.status(400).json({ error: "Cliente não encontrado" });
+      if (
+        kind === "clients" &&
+        store.all("clients").some((c) => c.id !== id && c.cpf === parsed.cpf)
+      )
+        return res
+          .status(409)
+          .json({ error: "Já existe um cliente com esse CPF" });
+      if (kind === "rules") validateRule(parsed, id);
+      const data = { ...parsed, id };
+      store.put(kind, id, data);
+      store.generate(today());
+      res.json(data);
+    });
+  }
+  // Os modelos iniciais possuem identificadores legíveis e podem ser editados.
+  app.put("/api/rules/:id", (req, res) => {
+    if (!store.get("rules", req.params.id)) return res.sendStatus(404);
+    const data = { ...ruleSchema.parse(req.body), id: req.params.id };
+    validateRule(data, data.id);
+    store.put("rules", data.id, data);
+    res.json(data);
+  });
+  const httpsUrl = z
+    .string()
+    .trim()
+    .refine((s) => {
+      if (!s) return true;
+      try {
+        const u = new URL(s);
+        return (
+          u.protocol === "https:" &&
+          !u.username &&
+          !u.password &&
+          !u.search &&
+          !u.hash &&
+          u.pathname === "/"
+        );
+      } catch {
+        return false;
+      }
+    }, "Use uma URL HTTPS sem caminho, usuário ou parâmetros")
+    .transform((s) => s.replace(/\/$/, ""));
+  app.put("/api/settings", (req, res) => {
+    const data = z
+      .object({
+        mode: z.enum(["simulation", "live"]),
+        auto: z.boolean(),
+        sendHour: z.number().int().min(0).max(19),
+        uazapiUrl: httpsUrl,
+        uazapiToken: z.string().max(2000).optional(),
+        handle: z
+          .string()
+          .trim()
+          .max(100)
+          .regex(/^[\w.-]*$/, "InfiniteTag inválida (sem $)"),
+        publicUrl: httpsUrl,
+      })
+      .parse(req.body);
+    const current = store.settings();
+    const updated = {
+      ...current,
+      ...data,
+      uazapiToken: data.uazapiToken
+        ? store.seal(data.uazapiToken)
+        : current.uazapiToken,
+    };
+    if (
+      updated.mode === "live" &&
+      (!updated.uazapiUrl ||
+        !updated.uazapiToken ||
+        !updated.handle ||
+        !updated.publicUrl)
+    )
+      return res
+        .status(400)
+        .json({ error: "Preencha as integrações antes de ativar o modo real" });
+    store.put("settings", "main", updated);
+    store.event(
+      "configuração",
+      `Configurações salvas. Modo: ${updated.mode}; automação: ${updated.auto ? "ativa" : "pausada"}`,
+    );
+    res.json(safeSettings());
+  });
+  app.post("/api/uazapi/status", async (req, res) => {
+    const s = store.settings();
+    if (!s.uazapiUrl || !s.uazapiToken)
+      throw new Error("Configure a Uazapi primeiro");
+    const result = await http(s.uazapiUrl + "/instance/status", null, {
+      token: store.unseal(s.uazapiToken),
+    });
+    res.json({
+      status: result.status || result.instance?.status || "Resposta recebida",
+      connected:
+        result.connected ??
+        result.status?.connected ??
+        result.instance?.status === "connected",
+    });
+  });
+  app.post("/api/generate", (req, res) =>
+    res.json({ generated: store.generate(today()) }),
+  );
+  app.post("/api/run", async (req, res) =>
+    res.json(await billing.run({ force: true })),
+  );
+  app.get("/api/preview/:id", (req, res) => {
+    const i = store.invoice(req.params.id);
+    if (!i) return res.sendStatus(404);
+    const c = store.get("clients", i.clientId),
+      p = store.get("plans", i.planId);
+    res.json(
+      store
+        .all("rules")
+        .map((r) => ({ name: r.name, text: render(r.template, i, c, p) })),
+    );
+  });
+  app.post("/api/invoices/:id/link", async (req, res) => {
+    if (store.settings().mode !== "live")
+      return res.status(400).json({
+        error: "Ative o modo real nas integrações para gerar um checkout",
+      });
+    res.json({ url: await billing.link(req.params.id) });
+  });
+  app.post("/api/invoices/:id/status", (req, res) => {
+    const { status, note } = z
+      .object({
+        status: z.enum(["paid", "cancelled"]),
+        note: z
+          .string()
+          .trim()
+          .min(5, "Informe uma justificativa de pelo menos 5 caracteres")
+          .max(300),
+      })
+      .parse(req.body);
+    const i = store.invoice(req.params.id);
+    if (!i) return res.sendStatus(404);
+    if (i.status !== "pending")
+      return res.status(409).json({ error: "Esta fatura já foi finalizada" });
+    i.status = status;
+    i.note = note;
+    if (status === "paid") {
+      i.paidAt = new Date().toISOString();
+      i.method = "manual";
+    }
+    store.saveInvoice(i);
+    store.event(
+      "baixa",
+      `${i.number}: ${status === "paid" ? "baixa manual" : "cancelamento"} — ${note}`,
+    );
+    res.json(i);
+  });
+  app.post("/api/deliveries/:id/retry", (req, res) => {
+    const d = store.db
+      .prepare("SELECT * FROM deliveries WHERE id=?")
+      .get(req.params.id);
+    if (!d || !["failed", "uncertain"].includes(d.status))
+      return res.status(400).json({
+        error: "Somente falhas podem ser liberadas para nova tentativa",
+      });
+    store.db.prepare("DELETE FROM deliveries WHERE id=?").run(d.id);
+    store.event(
+      "reenvio",
+      `Nova tentativa liberada para fatura ${d.invoice_id}. Histórico anterior: ${d.status}`,
+    );
+    res.json({ ok: true });
+  });
+  const webhookSchema = z
+    .object({
+      order_nsu: z.string().uuid(),
+      transaction_nsu: z.string().min(1).max(150),
+      invoice_slug: z.string().max(150).optional(),
+      slug: z.string().max(150).optional(),
+    })
+    .refine((v) => v.invoice_slug || v.slug);
+  const queue = (payload) => {
+    const p = webhookSchema.parse(payload);
+    if (!store.invoice(p.order_nsu)) throw new Error("Pedido não encontrado");
+    const id = p.order_nsu + ":" + p.transaction_nsu;
+    const old = store.get("webhooks", id);
+    if (!old)
+      store.put("webhooks", id, {
+        id,
+        payload: p,
+        attempts: 0,
+        done: false,
+        next: 0,
+      });
+  };
+  app.post("/webhooks/infinitepay", (req, res) => {
+    queue(req.body);
+    res.json({ success: true, message: null });
+  });
+  app.get("/pagamento", (req, res) => {
+    try {
+      queue(req.query);
+      res
+        .type("html")
+        .send(
+          '<html lang="pt-BR"><meta charset="UTF-8"><meta name="viewport" content="width=device-width"><title>Zap Hub • Pagamento</title><body><h1>Obrigado!</h1><p>Recebemos o retorno do checkout. O pagamento será conferido junto à InfinitePay. Após a confirmação, os lembretes serão interrompidos.</p></body></html>',
+        );
+    } catch {
+      res
+        .status(400)
+        .type("text")
+        .send(
+          "Não foi possível identificar a transação. Entre em contato com o responsável pela cobrança.",
+        );
+    }
+  });
+  let checking = false;
+  async function processWebhooks() {
+    if (checking) return;
+    checking = true;
+    try {
+      for (const job of store
+        .all("webhooks")
+        .filter((j) => !j.done && j.next < Date.now() && j.attempts < 20)
+        .slice(0, 20)) {
+        try {
+          await billing.confirm(job.payload);
+          job.done = true;
+        } catch (e) {
+          job.attempts++;
+          job.error = e.message;
+          job.next = Date.now() + 60000 * Math.min(job.attempts, 30);
+          if (job.attempts === 20)
+            store.event(
+              "erro",
+              `Confirmação pendente para ${job.payload.order_nsu}: ${e.message}`,
+            );
+        }
+        store.put("webhooks", job.id, job);
+      }
+    } finally {
+      checking = false;
+    }
+  }
+  app.use(express.static(resolve(root, "public")));
+  app.use((err, req, res, next) => {
+    if (res.headersSent) return next(err);
+    const message =
+      err instanceof z.ZodError
+        ? err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")
+        : err.message;
+    res
+      .status(err instanceof z.ZodError ? 400 : 400)
+      .json({ error: message || "Não foi possível concluir a operação" });
+  });
+  return { app, store, billing, processWebhooks };
+}
+if (
+  process.argv[1] &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  const { app, store, billing, processWebhooks } = createApp();
+  app.listen(
+    Number(process.env.PORT || 3090),
+    process.env.HOST || "127.0.0.1",
+    () =>
+      console.log(
+        `Zap Hub disponível em http://${process.env.HOST || "127.0.0.1"}:${process.env.PORT || 3090}`,
+      ),
+  );
+  const tick = async () => {
+    try {
+      await processWebhooks();
+      await billing.run();
+    } catch (e) {
+      store.event("erro", e.message);
+    }
+  };
+  tick();
+  setInterval(tick, 60000);
+}
