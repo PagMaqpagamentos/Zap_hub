@@ -85,6 +85,7 @@ export function createBilling(store, http = request) {
     const slug = payload.invoice_slug || payload.slug;
     if (!slug || !payload.transaction_nsu) throw new Error("Dados de transação incompletos");
     const paymentId = checkout.handle + ":" + payload.transaction_nsu;
+    if (checkout.testId && store.get("testPayments", paymentId)) return true;
     if (store.get("payments", paymentId)) return true;
     const result = await http("https://api.checkout.infinitepay.io/payment_check", {
       handle: checkout.handle, order_nsu: checkout.id,
@@ -92,6 +93,20 @@ export function createBilling(store, http = request) {
     });
     if (result.success !== true || result.paid !== true || Number(result.amount) !== checkout.amount || Number(result.paid_amount) < checkout.amount)
       throw new Error("Pagamento ainda não confirmado ou valor divergente");
+    if (checkout.testId) {
+      const test = store.get("integrationTests", checkout.testId);
+      if (!test) throw new Error("Teste não encontrado");
+      store.db.exec("BEGIN IMMEDIATE");
+      try {
+        if (!store.get("testPayments", paymentId)) {
+          store.put("testPayments", paymentId, { id: paymentId, orderId: checkout.id, amount: checkout.amount, created: new Date().toISOString() });
+          store.put("integrationTests", test.id, { ...test, status: "paid", paidAt: new Date().toISOString(), transaction: payload.transaction_nsu });
+          store.event("teste", "Pagamento de teste confirmado pela InfinitePay");
+        }
+        store.db.exec("COMMIT");
+      } catch (e) { store.db.exec("ROLLBACK"); throw e; }
+      return true;
+    }
     store.recordPayment({ id: paymentId, transaction: payload.transaction_nsu, orderId: checkout.id, slug,
       planId: checkout.planId, clientId: checkout.clientId, amount: checkout.amount, remaining: checkout.amount,
       method: result.capture_method, created: new Date().toISOString(), allocations: [] });
@@ -245,5 +260,59 @@ export function createBilling(store, http = request) {
       running = false;
     }
   }
-  return { link, confirm, eligible, run };
+  async function integrationTest(input) {
+    const previous = store.get("integrationTests", input.id);
+    if (previous) return previous;
+    const s = store.settings();
+    if (!s.handle || !s.publicUrl) throw new Error("Configure a InfiniteTag e a URL pública primeiro");
+    if (input.sendWhatsapp && (!s.uazapiUrl || !s.uazapiToken)) throw new Error("Configure a URL e o token da Uazapi antes de enviar o teste");
+    const test = { ...input, created: new Date().toISOString(), status: "creating", whatsappStatus: input.sendWhatsapp ? "waiting" : "not_requested" };
+    const saveTest = () => {
+      const current = store.get("integrationTests", test.id);
+      if (current?.status === "paid") Object.assign(test, { status: "paid", paidAt: current.paidAt, transaction: current.transaction });
+      store.put("integrationTests", test.id, test);
+    };
+    saveTest();
+    try {
+      if (input.kind === "invoice") {
+        const i = store.invoice(input.invoiceId);
+        if (!i || i.status !== "pending") throw new Error("Escolha uma fatura em aberto");
+        test.amount = balance(i);
+        test.paymentUrl = await link(i.id);
+        test.orderId = store.invoice(i.id).checkoutId || i.id;
+      } else {
+        test.orderId = randomUUID();
+        store.put("checkouts", test.orderId, { id: test.orderId, testId: test.id, amount: test.amount, handle: s.handle });
+        const result = await http("https://api.checkout.infinitepay.io/links", {
+          handle: s.handle, order_nsu: test.orderId, redirect_url: s.publicUrl + "/pagamento", webhook_url: s.publicUrl + "/webhooks/infinitepay",
+          items: [{ quantity: 1, price: test.amount, description: "Zap Hub — teste de integração Pix" }],
+        });
+        const url = new URL(result.url);
+        if (url.protocol !== "https:") throw new Error("Link inválido retornado pelo gateway");
+        test.paymentUrl = url.href;
+      }
+      test.status = "pending";
+      saveTest();
+      if (input.sendWhatsapp) {
+        test.whatsappStatus = "uncertain";
+        saveTest();
+        const result = await http(s.uazapiUrl + "/send/text", {
+          number: test.phone,
+          text: `Teste de cobrança Zap Hub. Valor: ${(test.amount / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}. Para pagar via Pix, acesse o checkout InfinitePay e escolha Pix: ${test.paymentUrl}`,
+        }, { token: store.unseal(s.uazapiToken) });
+        if (result.error || result.success === false) throw new Error("Uazapi não confirmou o envio. Confira no provedor antes de repetir.");
+        test.whatsappStatus = "sent";
+        test.providerId = result.messageid || result.id || null;
+      }
+    } catch (e) {
+      test.error = e.message;
+      if (!test.paymentUrl) test.status = "failed";
+    }
+    // A confirmação pode chegar enquanto a chamada ao WhatsApp ainda está em andamento.
+    const latest = store.get("integrationTests", test.id);
+    store.put("integrationTests", test.id, { ...test, ...(latest?.status === "paid" ? { status: "paid", paidAt: latest.paidAt, transaction: latest.transaction } : {}) });
+    store.event("teste", `Teste ${test.kind}: ${test.status}; WhatsApp: ${test.whatsappStatus}`);
+    return store.get("integrationTests", test.id);
+  }
+  return { link, confirm, eligible, run, integrationTest };
 }

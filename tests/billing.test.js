@@ -351,3 +351,36 @@ test("reinício preserva alocação parcial e crédito sem repetir transação",
   await createBilling(s,async()=>{throw new Error("Não deveria consultar novamente");}).confirm(payload);
   assert.equal(s.invoice(i.id).paidAmount,10000);assert.equal(s.all("payments")[0].remaining,5000);assert.equal(s.all("payments")[0].allocations.length,1);
 });
+
+test("teste separado envia WhatsApp real uma vez em simulação e não altera faturas", async t => {
+  const {s}=fixture(t);s.generate("2026-10-01");
+  s.put("settings","main",{...s.settings(),handle:"loja",publicUrl:"https://exemplo.test",uazapiUrl:"https://uazapi.test",uazapiToken:s.seal("segredo")});
+  const calls=[];
+  const b=createBilling(s,async(url,body)=>{calls.push({url,body});if(url.endsWith("/links")) return {url:"https://checkout.infinitepay.com.br/test"}; if(url.endsWith("/send/text")) return {id:"sent"};return {success:true,paid:true,amount:100,paid_amount:100,capture_method:"pix"};});
+  const input={id:randomUUID(),kind:"standalone",amount:100,sendWhatsapp:true,phone:"5511999999999"};
+  const before=JSON.stringify(s.invoices());
+  const result=await b.integrationTest(input);await b.integrationTest(input);
+  assert.equal(result.whatsappStatus,"sent");assert.equal(calls.length,2);assert.equal(calls[0].body.items[0].price,100);
+  assert.equal(calls[1].body.number,input.phone);assert.ok(calls[1].body.text.includes(result.paymentUrl));
+  await b.confirm({order_nsu:result.orderId,transaction_nsu:"teste",slug:"s"});await b.confirm({order_nsu:result.orderId,transaction_nsu:"teste",slug:"s"});
+  assert.equal(s.get("integrationTests",input.id).status,"paid");assert.equal(s.all("testPayments").length,1);
+  assert.equal(JSON.stringify(s.invoices()),before);assert.equal(s.all("payments").length,0);assert.equal(s.settings().mode,"simulation");
+});
+
+test("teste de fatura usa saldo real, baixa normal e não exige WhatsApp", async t => {
+  const {s}=fixture(t);s.generate("2026-10-01");s.put("settings","main",{...s.settings(),handle:"loja",publicUrl:"https://exemplo.test"});
+  const i=s.invoices().find(i=>i.reference==="2026-10");
+  const b=createBilling(s,async url=>url.endsWith("/links")?{url:"https://checkout.infinitepay.com.br/test"}:{success:true,paid:true,amount:14990,paid_amount:14990,capture_method:"pix"});
+  const result=await b.integrationTest({id:randomUUID(),kind:"invoice",invoiceId:i.id,amount:100,sendWhatsapp:false,phone:""});
+  assert.equal(result.amount,14990);
+  await b.confirm({order_nsu:result.orderId,transaction_nsu:"real",slug:"s"});
+  assert.equal(s.invoice(i.id).status,"paid");assert.equal(s.all("payments").length,1);
+});
+
+test("envio de teste incerto preserva link e não repete ao repetir requisição",async t=>{
+  const {s}=fixture(t);s.put("settings","main",{...s.settings(),handle:"loja",publicUrl:"https://exemplo.test",uazapiUrl:"https://uazapi.test",uazapiToken:s.seal("t")});
+  let sends=0;const b=createBilling(s,async url=>{if(url.endsWith("/links"))return {url:"https://checkout.infinitepay.com.br/test"};sends++;throw new Error("timeout");});
+  const input={id:randomUUID(),kind:"standalone",amount:100,phone:"5511999999999",sendWhatsapp:true};
+  const result=await b.integrationTest(input);await b.integrationTest(input);
+  assert.equal(result.whatsappStatus,"uncertain");assert.ok(result.paymentUrl);assert.equal(sends,1);
+});

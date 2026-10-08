@@ -100,3 +100,21 @@ test("edição de fatura valida versão, datas, saldo e preserva geração recor
   assert.equal((await edit({...next,amount:13000})).status,200);
   assert.equal(store.invoice(i.id).paidAmount,5000);
 });
+
+test("API de teste exige login, valida entrada e confirma webhook separado",async t=>{
+ const dir=mkdtempSync(join(tmpdir(),"zap-hub-integration-"));
+ const {app,store,processWebhooks}=createApp(dir,async url=>url.endsWith("/links")?{url:"https://checkout.infinitepay.com.br/test"}:{success:true,paid:true,amount:100,paid_amount:100,capture_method:"pix"});
+ const server=app.listen(0,"127.0.0.1");await new Promise(r=>server.once("listening",r));t.after(async()=>{await new Promise(r=>server.close(r));store.db.close();rmSync(dir,{recursive:true,force:true});});
+ const base=`http://127.0.0.1:${server.address().port}`;
+ const post=(path,data,cookie="")=>fetch(base+path,{method:"POST",headers:{"Content-Type":"application/json",cookie},body:JSON.stringify(data)});
+ const login=await post("/api/auth",{password:"Teste-seguro-123"});const cookie=login.headers.get("set-cookie").split(";")[0];
+ store.put("settings","main",{...store.settings(),handle:"loja",publicUrl:"https://exemplo.test"});
+ const input={id:crypto.randomUUID(),kind:"standalone",amount:100,sendWhatsapp:false,phone:""};
+ assert.equal((await post("/api/integration-tests",input)).status,401);
+ assert.equal((await post("/api/integration-tests",{...input,amount:0},cookie)).status,400);
+ assert.equal((await post("/api/integration-tests",{...input,sendWhatsapp:true},cookie)).status,400);
+ const response=await post("/api/integration-tests",input,cookie);assert.equal(response.status,200);const result=await response.json();
+ assert.equal(result.status,"pending");
+ assert.equal((await post("/webhooks/infinitepay",{order_nsu:result.orderId,transaction_nsu:"integration",slug:"test"})).status,200);
+ await processWebhooks();assert.equal(store.get("integrationTests",input.id).status,"paid");assert.equal(store.invoices().length,0);
+});

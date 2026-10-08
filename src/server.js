@@ -172,6 +172,7 @@ export function createApp(
       rules: store.all("rules").sort((a, b) => a.offset - b.offset),
       invoices: store.invoices(),
       payments: store.all("payments"),
+      integrationTests: store.all("integrationTests").sort((a,b) => b.created.localeCompare(a.created)).slice(0,30),
       deliveries: store.deliveries(),
       logs: store.logs(),
       settings: safeSettings(),
@@ -320,6 +321,17 @@ export function createApp(
         result.status?.connected ??
         result.instance?.status === "connected",
     });
+  });
+  app.post("/api/integration-tests", async (req, res) => {
+    const input = z.object({
+      id: z.string().uuid(), kind: z.enum(["standalone", "invoice"]),
+      amount: z.number().int().min(1).max(100000000).default(100),
+      invoiceId: z.string().uuid().optional(),
+      sendWhatsapp: z.boolean().default(false),
+      phone: z.string().transform(s => s.replace(/\D/g, "")).default(""),
+    }).refine(v => v.kind !== "invoice" || !!v.invoiceId, "Selecione uma fatura")
+      .refine(v => !v.sendWhatsapp || /^55\d{10,11}$/.test(v.phone), "Informe WhatsApp com 55 + DDD + número").parse(req.body);
+    res.json(await billing.integrationTest(input));
   });
   app.post("/api/generate", (req, res) =>
     res.json({ generated: store.generate(today()) }),

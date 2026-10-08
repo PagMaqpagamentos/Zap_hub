@@ -99,3 +99,7 @@ Cada transação confirmada no payment_check da InfinitePay é registrada uma ú
 O editor permite alterar nome, número, cliente/cobrança, referência, vencimento, valor, status, data de pagamento e observação. A empresa vem do cadastro do cliente. Campos internos e dados de transação são preservados; faturas com recebimentos não podem ser transferidas, canceladas ou reduzidas abaixo do total recebido. Há controle de versão para evitar sobrescrever recebimentos concorrentes e histórico das edições. Alterar uma fatura não altera o contrato recorrente. A exclusão de cliente preserva também faturas parcialmente pagas.
 
 Documentação do gateway: https://www.infinitepay.io/checkout-documentacao
+
+## Testes das integrações
+
+Em Integrações, a seção Testar Pix e WhatsApp gera um checkout real mesmo no modo simulação, sem ativar a rotina. O teste separado usa R$ 1,00 por padrão, aceita outro valor e mantém os recebimentos de teste fora das faturas e créditos dos clientes. O teste de fatura existente cobra seu saldo e usa a conciliação normal por ordem de vencimento. O envio opcional usa o telefone informado e exige Uazapi configurada. Os resultados mostram link, confirmação de pagamento, situação do WhatsApp, faturas afetadas e saldo. A aceitação pela Uazapi não comprova entrega ou leitura. Uma requisição repetida com o mesmo ID não repete a criação nem o envio. Em caso de envio incerto, o link fica disponível e não há repetição automática. O pagamento é realizado pelo usuário no checkout.
