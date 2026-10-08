@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
-import { defaultRules, dueDate, ruleKind } from "./domain.js";
+import { defaultRules, dueDate, ruleKind, balance } from "./domain.js";
 export function createStore(dir) {
   mkdirSync(dir, { recursive: true });
   const keyPath = join(dir, "secret.key");
@@ -64,6 +64,35 @@ export function createStore(dir) {
     db
       .prepare("INSERT INTO events(created,kind,message) VALUES(?,?,?)")
       .run(new Date().toISOString(), kind, message);
+  // Transações são registradas uma única vez; alocações e saldo ficam persistentes.
+  const allocateCredits = () => {
+    for (const payment of all("payments").filter(p => p.remaining > 0).sort((a,b) => a.created.localeCompare(b.created) || a.id.localeCompare(b.id))) {
+      if (get("clients", payment.clientId)?.deletedAt) continue;
+      const open = invoices().filter(i => i.planId === payment.planId && i.clientId === payment.clientId && i.status === "pending")
+        .sort((a,b) => a.due.localeCompare(b.due) || a.reference.localeCompare(b.reference) || (a.created || "").localeCompare(b.created || "") || a.id.localeCompare(b.id));
+      for (const i of open) {
+        if (!payment.remaining) break;
+        const applied = Math.min(payment.remaining, balance(i));
+        if (!applied) continue;
+        i.paidAmount = (i.paidAmount || 0) + applied;
+        i.updatedAt = new Date().toISOString();
+        i.revision = crypto.randomUUID();
+        i.paymentUrl = ""; i.checkoutId = "";
+        if (i.paidAmount >= i.amount) { i.status = "paid"; i.paidAt = payment.created; }
+        i.method = payment.method;
+        payment.remaining -= applied;
+        payment.allocations.push({ invoiceId: i.id, amount: applied, date: i.updatedAt });
+        saveInvoice(i);
+        event("pagamento", `${i.number}: recebido ${(applied / 100).toFixed(2)}; saldo ${(balance(i) / 100).toFixed(2)}.`);
+      }
+      put("payments", payment.id, payment);
+    }
+  };
+  const applyCredits = () => {
+    db.exec("BEGIN IMMEDIATE");
+    try { allocateCredits(); db.exec("COMMIT"); }
+    catch (e) { db.exec("ROLLBACK"); throw e; }
+  };
   if (!get("settings", "main"))
     put("settings", "main", {
       mode: "simulation",
@@ -150,6 +179,13 @@ export function createStore(dir) {
   db.prepare(
     "UPDATE deliveries SET status='failed' WHERE status='preparing'",
   ).run();
+  // Guardar links e baixas anteriores antes de permitir alterações das faturas.
+  for (const i of invoices()) {
+    if (i.gatewayHandle && !get("checkouts", i.checkoutId || i.id))
+      put("checkouts", i.checkoutId || i.id, { id: i.checkoutId || i.id, invoiceId: i.id, planId: i.planId, clientId: i.clientId, amount: i.amount, handle: i.gatewayHandle });
+    if (i.transaction && i.gatewayHandle && !get("payments", i.gatewayHandle + ":" + i.transaction))
+      put("payments", i.gatewayHandle + ":" + i.transaction, { id: i.gatewayHandle + ":" + i.transaction, planId: i.planId, clientId: i.clientId, amount: i.amount, remaining: 0, created: i.paidAt || i.created, method: i.method, allocations: [{ invoiceId: i.id, amount: i.amount }], legacy: true });
+  }
   return {
     db,
     all,
@@ -161,6 +197,24 @@ export function createStore(dir) {
     invoices,
     saveInvoice,
     event,
+    applyCredits,
+    recordPayment(payment) {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        if (!get("payments", payment.id)) {
+          put("payments", payment.id, payment);
+          const checkout = get("checkouts", payment.orderId);
+          const source = checkout && invoice(checkout.invoiceId);
+          if (source && (source.checkoutId === payment.orderId || (!source.checkoutId && source.id === payment.orderId))) {
+            source.paymentUrl = ""; source.checkoutId = ""; source.revision = crypto.randomUUID();
+            saveInvoice(source);
+          }
+          event("recebimento", `Pagamento confirmado: ${(payment.amount / 100).toFixed(2)}. Transação ${payment.transaction}.`);
+        }
+        allocateCredits();
+        db.exec("COMMIT");
+      } catch (e) { db.exec("ROLLBACK"); throw e; }
+    },
     deleteClient(id, now) {
       const c = get("clients", id);
       if (!c || c.deletedAt) return null;
@@ -169,7 +223,7 @@ export function createStore(dir) {
         put("clients", id, { ...c, active: false, deletedAt: new Date().toISOString() });
         for (const p of all("plans").filter((p) => p.clientId === id))
           put("plans", p.id, { ...p, active: false });
-        const future = invoices().filter((i) => i.clientId === id && i.due > now && i.status !== "paid");
+        const future = invoices().filter((i) => i.clientId === id && i.due > now && i.status !== "paid" && !(i.paidAmount > 0));
         for (const i of future) db.prepare("DELETE FROM invoices WHERE id=?").run(i.id);
         event("cliente", `Cliente excluído: ${c.name}. ${future.length} faturas futuras removidas.`);
         db.exec("COMMIT");
@@ -203,7 +257,7 @@ export function createStore(dir) {
         let month = p.start.slice(0, 7);
         while (month <= p.end.slice(0, 7) && month <= horizon) {
           const due = dueDate(month, p.day);
-          if (due >= p.start && due <= p.end) {
+          if (due >= p.start && due <= p.end && !invoices().some(i => i.planId === p.id && i.reference === month)) {
             const id = crypto.randomUUID();
             const data = {
               id,
@@ -232,6 +286,7 @@ export function createStore(dir) {
           month = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 7);
         }
       }
+      applyCredits();
       return count;
     },
   };

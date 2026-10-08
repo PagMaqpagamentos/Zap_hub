@@ -836,3 +836,9 @@ dialog::backdrop {
     gap: 20px;
   }
 }
+
+.plans-table { white-space: normal; }
+.plans-table th, .plans-table td { padding: 14px 10px; }
+.plans-table td:first-child, .plans-table td:nth-child(2) { max-width: 190px; overflow-wrap: anywhere; }
+.plans-table td:last-child button { display: block; margin: 4px 0; }
+.plans-table small { line-height: 1.5; }

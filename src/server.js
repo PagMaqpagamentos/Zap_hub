@@ -20,6 +20,7 @@ import {
   render,
   sendTimesSchema,
   ruleKind,
+  invoiceEditSchema,
 } from "./domain.js";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export function createApp(
@@ -170,6 +171,7 @@ export function createApp(
       plans: store.all("plans"),
       rules: store.all("rules").sort((a, b) => a.offset - b.offset),
       invoices: store.invoices(),
+      payments: store.all("payments"),
       deliveries: store.deliveries(),
       logs: store.logs(),
       settings: safeSettings(),
@@ -377,6 +379,44 @@ export function createApp(
         })),
     );
   });
+  app.put("/api/invoices/:id", (req, res) => {
+    const data = invoiceEditSchema.parse(req.body);
+    const i = store.invoice(req.params.id);
+    if (!i) return res.sendStatus(404);
+    if (data.revision !== (i.revision || i.updatedAt || i.created || ""))
+      return res.status(409).json({ error: "A fatura foi alterada ou recebeu um pagamento. Atualize a página antes de editar." });
+    const c = store.get("clients", data.clientId), p = store.get("plans", data.planId);
+    if (!c || c.deletedAt || !p || p.clientId !== c.id)
+      return res.status(400).json({ error: "Selecione uma cobrança do cliente informado" });
+    const received = i.paidAmount ?? (i.status === "paid" ? i.amount : 0);
+    if (data.amount < received)
+      return res.status(400).json({ error: "O valor não pode ser menor que o já recebido. Concilie o recebimento antes de reduzir." });
+    if (received > 0 && (data.clientId !== i.clientId || data.planId !== i.planId))
+      return res.status(400).json({ error: "Fatura com recebimentos não pode ser transferida para outro cliente ou cobrança." });
+    if (data.status === "pending" && received >= data.amount)
+      return res.status(400).json({ error: "A fatura já está integralmente quitada." });
+    if (data.status === "cancelled" && received > 0)
+      return res.status(400).json({ error: "Fatura com recebimento exige conciliação antes de cancelar." });
+    if (data.status !== i.status && data.note.length < 5)
+      return res.status(400).json({ error: "Informe uma justificativa para alterar o status." });
+    if (store.invoices().some(other => other.id !== i.id && other.number === data.number))
+      return res.status(409).json({ error: "Já existe uma fatura com este número." });
+    if (store.invoices().some(other => other.id !== i.id && other.planId === data.planId && other.reference === data.reference))
+      return res.status(409).json({ error: "Já existe uma fatura dessa cobrança para a referência informada." });
+    const { revision, ...fields } = data;
+    const updated = { ...i, ...fields, paidAmount: data.status === "paid" ? data.amount : received,
+      revision: randomUUID(), updatedAt: new Date().toISOString() };
+    if (updated.status === "paid") { updated.paidAt = data.paidAt === i.paidAt?.slice(0,10) ? i.paidAt : data.paidAt || today(); if (i.status !== "paid") updated.method = "manual"; }
+    else updated.paidAt = "";
+    if (["amount", "clientId", "planId", "name", "reference", "due", "number", "status"].some(key => i[key] !== updated[key])) {
+      updated.paymentUrl = ""; updated.checkoutId = "";
+    }
+    store.put("invoiceRevisions", updated.revision, { before: i, after: updated });
+    store.saveInvoice(updated);
+    store.event("edicao", `Fatura ${i.number} editada. Campos: ${Object.keys(fields).filter(key => i[key] !== fields[key]).join(", ")}. ${data.note}`);
+    store.applyCredits();
+    res.json(store.invoice(i.id));
+  });
   app.post("/api/invoices/:id/link", async (req, res) => {
     if (store.settings().mode !== "live")
       return res.status(400).json({
@@ -399,12 +439,16 @@ export function createApp(
     if (!i) return res.sendStatus(404);
     if (i.status !== "pending")
       return res.status(409).json({ error: "Esta fatura já foi finalizada" });
+    if (status === "cancelled" && i.paidAmount > 0)
+      return res.status(409).json({ error: "Fatura com recebimento exige conciliação antes de cancelar." });
     i.status = status;
     i.note = note;
     if (status === "paid") {
+      i.paidAmount = i.amount;
       i.paidAt = new Date().toISOString();
       i.method = "manual";
     }
+    i.revision = randomUUID();
     store.saveInvoice(i);
     store.event(
       "baixa",
@@ -437,7 +481,7 @@ export function createApp(
     .refine((v) => v.invoice_slug || v.slug);
   const queue = (payload) => {
     const p = webhookSchema.parse(payload);
-    if (!store.invoice(p.order_nsu)) throw new Error("Pedido não encontrado");
+    if (!store.get("checkouts", p.order_nsu) && !store.invoice(p.order_nsu)) throw new Error("Pedido não encontrado");
     const id = p.order_nsu + ":" + p.transaction_nsu;
     const old = store.get("webhooks", id);
     if (!old)

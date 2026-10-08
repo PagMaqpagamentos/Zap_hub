@@ -70,3 +70,33 @@ test("importação autenticada valida documentos e evita duplicação ao repetir
   assert.equal((await call("/api/clients/"+id,null,"DELETE")).status,200);
   assert.equal((await call("/api/clients",{...c,id})).status,409);
 });
+
+test("edição de fatura valida versão, datas, saldo e preserva geração recorrente", async t => {
+  const dir=mkdtempSync(join(tmpdir(),"zap-hub-edit-"));
+  const {app,store}=createApp(dir);const server=app.listen(0,"127.0.0.1");await new Promise(r=>server.once("listening",r));
+  t.after(async()=>{await new Promise(r=>server.close(r));store.db.close();rmSync(dir,{recursive:true,force:true});});
+  const base=`http://127.0.0.1:${server.address().port}`;
+  const login=await fetch(base+"/api/auth",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:"Teste-seguro-123"})});
+  const cookie=login.headers.get("set-cookie").split(";")[0];
+  const cid=crypto.randomUUID(),pid=crypto.randomUUID();
+  store.put("clients",cid,{id:cid,name:"Teste",company:"Empresa",active:true});
+  store.put("plans",pid,{id:pid,clientId:cid,name:"Mensal",amount:10000,day:10,start:"2026-10-01",end:"2027-01-31",active:true});
+  store.generate("2026-10-01");
+  const i=store.invoices().find(i=>i.reference==="2026-10");
+  const payload={name:"Editada",number:"FAT-EDITADA",clientId:cid,planId:pid,reference:"2026-10",due:"2026-10-15",amount:12000,status:"pending",note:"Ajuste solicitado",paidAt:"",revision:i.created};
+  const edit=(data,auth=true)=>fetch(base+"/api/invoices/"+i.id,{method:"PUT",headers:{"Content-Type":"application/json",...(auth?{cookie}:{})},body:JSON.stringify(data)});
+  assert.equal((await edit(payload,false)).status,401);
+  assert.equal((await edit({...payload,due:"2026-02-30"})).status,400);
+  assert.equal((await edit({...payload,reference:"2026-11"})).status,409);
+  assert.equal((await edit(payload)).status,200);
+  assert.equal(store.invoice(i.id).amount,12000);
+  assert.equal((await edit(payload)).status,409);
+  assert.equal(store.generate("2026-10-01"),0);
+  assert.equal(store.invoices().length,3);
+  const paid={...store.invoice(i.id),paidAmount:5000};store.saveInvoice(paid);
+  const next={...payload,revision:paid.revision};
+  assert.equal((await edit({...next,amount:4000})).status,400);
+  assert.equal((await edit({...next,status:"cancelled"})).status,400);
+  assert.equal((await edit({...next,amount:13000})).status,200);
+  assert.equal(store.invoice(i.id).paidAmount,5000);
+});

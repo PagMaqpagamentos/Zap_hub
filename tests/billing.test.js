@@ -205,7 +205,8 @@ test("callback é confirmado no gateway e rejeita valor divergente; pagamento é
   amount = 14990;
   await b.confirm(payload);
   await b.confirm(payload);
-  assert.equal(s.invoice(i.id).status, "paid");
+  assert.equal(s.invoices().find(x=>x.reference==="2026-10").status, "paid");
+  assert.equal(s.invoice(i.id).status, "pending");
   assert.equal(s.logs().filter((l) => l.kind === "pagamento").length, 1);
 });
 test("rotina respeita pausa e horário automático", async (t) => {
@@ -291,4 +292,62 @@ test("cliente sem WhatsApp não recebe lembretes", (t) => {
   assert.equal(createBilling(s).eligible("2026-10-10").length,0);
   assert.equal(clientSchema.safeParse({...c,phone:"",cpf:"11.222.333/0001-81"}).success,true);
   assert.equal(clientSchema.safeParse({...c,cpf:"11.222.333/0001-82"}).success,false);
+});
+
+test("Pix aplica parcial e excedente em ordem; repetição e concorrência não duplicam", async t => {
+  const {s,c,p}=fixture(t); s.generate("2026-10-01");
+  const ordered=()=>s.invoices().sort((a,b)=>a.due.localeCompare(b.due));
+  const source=ordered()[2];
+  const checkout={id:randomUUID(),invoiceId:source.id,planId:p.id,clientId:c.id,amount:10000,handle:"loja"};
+  s.put("checkouts",checkout.id,checkout);
+  const b=createBilling(s,async()=>({success:true,paid:true,amount:10000,paid_amount:10000,capture_method:"pix"}));
+  const payload={order_nsu:checkout.id,transaction_nsu:"primeiro",slug:"slug"};
+  await Promise.all([b.confirm(payload),b.confirm(payload)]);
+  assert.equal(ordered()[0].paidAmount,10000); assert.equal(ordered()[0].status,"pending");
+  assert.equal(s.all("payments").length,1);
+  await b.confirm({...payload,transaction_nsu:"segundo"});
+  assert.equal(ordered()[0].status,"paid"); assert.equal(ordered()[1].paidAmount,5010);
+  assert.equal(ordered()[2].paidAmount,undefined);
+  assert.equal(s.all("payments").reduce((n,p)=>n+p.allocations.reduce((n,a)=>n+a.amount,0),0),20000);
+  await b.confirm({...payload,transaction_nsu:"segundo"});
+  assert.equal(ordered()[1].paidAmount,5010);
+});
+
+test("crédito excedente persiste e quita próxima referência sem afetar outra cobrança", async t => {
+  const {s,c,p}=fixture(t); s.put("plans",p.id,{...p,end:"2027-01-31"}); s.generate("2026-10-01");
+  const other={...p,id:randomUUID()}; s.put("plans",other.id,other);s.generate("2026-10-01");
+  const order={id:randomUUID(),invoiceId:s.invoices().find(i=>i.planId===p.id).id,planId:p.id,clientId:c.id,amount:50000,handle:"loja"}; s.put("checkouts",order.id,order);
+  const b=createBilling(s,async()=>({success:true,paid:true,amount:50000,paid_amount:50100,capture_method:"pix"}));
+  await b.confirm({order_nsu:order.id,transaction_nsu:"credito",slug:"s"});
+  assert.equal(s.all("payments")[0].remaining,5030);
+  assert.ok(s.invoices().filter(i=>i.planId===other.id).every(i=>i.status==="pending"));
+  s.generate("2026-11-01");
+  assert.equal(s.invoices().find(i=>i.planId===p.id&&i.reference==="2027-01").paidAmount,5030);
+  assert.equal(s.all("payments")[0].remaining,0);
+});
+
+test("link cobra só saldo e checkout antigo conserva valor após edição", async t => {
+  const {s,c,p}=fixture(t);s.generate("2026-10-01");
+  s.put("settings","main",{...s.settings(),handle:"loja",publicUrl:"https://exemplo.test"});
+  const i=s.invoices().find(i=>i.reference==="2026-10");
+  s.saveInvoice({...i,paidAmount:10000});
+  let sent;
+  const b=createBilling(s,async(url,body)=>{if(url.endsWith("/links")){sent=body;return {url:"https://checkout.infinitepay.com.br/test"};}return {success:true,paid:true,amount:4990,paid_amount:4990,capture_method:"pix"};});
+  await b.link(i.id);assert.equal(sent.items[0].price,4990);assert.notEqual(sent.order_nsu,i.id);
+  s.saveInvoice({...s.invoice(i.id),amount:16000,paymentUrl:"",revision:randomUUID()});
+  await b.confirm({order_nsu:sent.order_nsu,transaction_nsu:"link-antigo",slug:"s"});
+  assert.equal(s.invoice(i.id).paidAmount,14990);assert.equal(s.invoice(i.id).status,"pending");
+});
+
+test("reinício preserva alocação parcial e crédito sem repetir transação", async t => {
+  const dir=mkdtempSync(join(tmpdir(),"zap-hub-persist-"));let s=createStore(dir);
+  t.after(()=>{s.db.close();rmSync(dir,{recursive:true,force:true});});
+  const cid=randomUUID(),pid=randomUUID();
+  s.put("clients",cid,{id:cid,active:true});s.put("plans",pid,{id:pid,clientId:cid,name:"Teste",amount:10000,day:10,start:"2026-10-01",end:"2026-10-31",active:true});s.generate("2026-10-01");
+  const i=s.invoices()[0],order={id:randomUUID(),invoiceId:i.id,planId:pid,clientId:cid,amount:15000,handle:"loja"};s.put("checkouts",order.id,order);
+  const payload={order_nsu:order.id,transaction_nsu:"persistente",slug:"s"};
+  await createBilling(s,async()=>({success:true,paid:true,amount:15000,paid_amount:15000,capture_method:"pix"})).confirm(payload);
+  s.db.close();s=createStore(dir);
+  await createBilling(s,async()=>{throw new Error("Não deveria consultar novamente");}).confirm(payload);
+  assert.equal(s.invoice(i.id).paidAmount,10000);assert.equal(s.all("payments")[0].remaining,5000);assert.equal(s.all("payments")[0].allocations.length,1);
 });

@@ -89,3 +89,13 @@ Os testes cobrem datas, validação, recorrência, substituição de campos, dup
 Busca por nome, empresa, CPF/CNPJ e WhatsApp, inclusive com pontuação. Excluir oculta o cadastro, pausa suas cobranças e remove faturas não pagas com vencimento posterior ao dia atual (Brasília). Pagamentos, faturas até hoje e histórico de mensagens são preservados. Uma mensagem já aceita pelo provedor não pode ser desfeita.
 
 A importação autenticada aceita JSON com name, company, cpf, phone e active. Não altera clientes existentes, não cria cobranças e ignora duplicados por documento ou telefone. Documentos inválidos são informados por linha. Telefone pode ficar vazio; isso impede todos os avisos até o preenchimento.
+
+## Pagamentos por ordem e edição de faturas
+
+Cobranças exibe a fatura aberta mais antiga até o mês atual, ou a última quitada do período; quando ainda não há referência nesse período, exibe a próxima. A situação financeira é separada do estado da automação. A busca inclui nome, cliente, empresa, referência e vencimento.
+
+Cada transação confirmada no payment_check da InfinitePay é registrada uma única vez por conta e NSU. O valor principal confirmado (sem tratar acréscimos do checkout como crédito) é aplicado em ordem de vencimento, referência, criação e identificador, somente na mesma cobrança e cliente do checkout. Recebimentos parciais mantêm a fatura aberta; excedentes passam à próxima e eventual sobra permanece em crédito para futuras referências. Links novos cobram o saldo. Links antigos preservam o valor e a identificação originais para conciliação. Nenhuma chamada de rede ocorre dentro da transação de alocação SQLite.
+
+O editor permite alterar nome, número, cliente/cobrança, referência, vencimento, valor, status, data de pagamento e observação. A empresa vem do cadastro do cliente. Campos internos e dados de transação são preservados; faturas com recebimentos não podem ser transferidas, canceladas ou reduzidas abaixo do total recebido. Há controle de versão para evitar sobrescrever recebimentos concorrentes e histórico das edições. Alterar uma fatura não altera o contrato recorrente. A exclusão de cliente preserva também faturas parcialmente pagas.
+
+Documentação do gateway: https://www.infinitepay.io/checkout-documentacao

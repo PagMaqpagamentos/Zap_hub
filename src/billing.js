@@ -6,6 +6,7 @@ import {
   time,
   ruleKind,
   scheduledSlot,
+  balance,
 } from "./domain.js";
 export async function request(url, body, headers = {}) {
   const response = await fetch(url, {
@@ -36,15 +37,18 @@ export function createBilling(store, http = request) {
         throw new Error(
           "Configure a InfiniteTag e a URL pública HTTPS em Integrações",
         );
+      const orderId = randomUUID();
+      const checkout = { id: orderId, invoiceId: i.id, planId: i.planId, clientId: i.clientId, amount: balance(i), handle: s.handle };
+      store.put("checkouts", orderId, checkout);
       const result = await http("https://api.checkout.infinitepay.io/links", {
         handle: s.handle,
-        order_nsu: i.id,
+        order_nsu: orderId,
         redirect_url: s.publicUrl + "/pagamento",
         webhook_url: s.publicUrl + "/webhooks/infinitepay",
         items: [
           {
             quantity: 1,
-            price: i.amount,
+            price: checkout.amount,
             description: `${i.name} • ${i.reference.split("-").reverse().join("/")} • ${i.number}`,
           },
         ],
@@ -54,6 +58,9 @@ export function createBilling(store, http = request) {
         throw new Error("Link inválido retornado pelo gateway");
       const current = store.invoice(id);
       if (!current) throw new Error("Fatura excluída durante a geração do link");
+      if (current.status !== "pending" || balance(current) !== checkout.amount || current.clientId !== checkout.clientId || current.planId !== checkout.planId || (current.revision || "") !== (i.revision || ""))
+        throw new Error("A fatura mudou durante a geração do link. Gere novamente.");
+      current.checkoutId = orderId;
       current.paymentUrl = url.href;
       current.gatewayHandle = s.handle;
       store.saveInvoice(current);
@@ -68,39 +75,26 @@ export function createBilling(store, http = request) {
     }
   }
   async function confirm(payload) {
-    const i = store.invoice(payload.order_nsu);
-    if (!i) throw new Error("Pedido não encontrado");
-    if (!i.gatewayHandle) throw new Error("Fatura sem checkout gerado");
+    let checkout = store.get("checkouts", payload.order_nsu);
+    if (!checkout) {
+      const old = store.invoice(payload.order_nsu);
+      if (!old?.gatewayHandle) throw new Error("Pedido não encontrado ou sem checkout gerado");
+      checkout = { id: old.id, invoiceId: old.id, planId: old.planId, clientId: old.clientId, amount: old.amount, handle: old.gatewayHandle };
+      store.put("checkouts", checkout.id, checkout);
+    }
     const slug = payload.invoice_slug || payload.slug;
-    if (!slug || !payload.transaction_nsu)
-      throw new Error("Dados de transação incompletos");
-    const result = await http(
-      "https://api.checkout.infinitepay.io/payment_check",
-      {
-        handle: i.gatewayHandle,
-        order_nsu: i.id,
-        transaction_nsu: payload.transaction_nsu,
-        slug,
-      },
-    );
-    if (
-      result.success !== true ||
-      result.paid !== true ||
-      Number(result.amount) !== i.amount ||
-      Number(result.paid_amount) < i.amount
-    )
+    if (!slug || !payload.transaction_nsu) throw new Error("Dados de transação incompletos");
+    const paymentId = checkout.handle + ":" + payload.transaction_nsu;
+    if (store.get("payments", paymentId)) return true;
+    const result = await http("https://api.checkout.infinitepay.io/payment_check", {
+      handle: checkout.handle, order_nsu: checkout.id,
+      transaction_nsu: payload.transaction_nsu, slug,
+    });
+    if (result.success !== true || result.paid !== true || Number(result.amount) !== checkout.amount || Number(result.paid_amount) < checkout.amount)
       throw new Error("Pagamento ainda não confirmado ou valor divergente");
-    const fresh = store.invoice(i.id);
-    if (fresh.status === "paid") return true;
-    if (fresh.status === "cancelled")
-      throw new Error("Pagamento de fatura cancelada: concilie manualmente");
-    fresh.status = "paid";
-    fresh.paidAt = new Date().toISOString();
-    fresh.method = result.capture_method;
-    fresh.transaction = payload.transaction_nsu;
-    fresh.slug = slug;
-    store.saveInvoice(fresh);
-    store.event("pagamento", `Pagamento confirmado: ${i.number}`);
+    store.recordPayment({ id: paymentId, transaction: payload.transaction_nsu, orderId: checkout.id, slug,
+      planId: checkout.planId, clientId: checkout.clientId, amount: checkout.amount, remaining: checkout.amount,
+      method: result.capture_method, created: new Date().toISOString(), allocations: [] });
     return true;
   }
   function eligible(now = today()) {

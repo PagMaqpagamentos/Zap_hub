@@ -41,8 +41,9 @@ for (const [name, company, amount, day] of [
   });
 }
 store.generate(today());
-const server = app.listen(3091, "127.0.0.1", () =>
-  console.log("QA temporário: http://127.0.0.1:3091"),
+const port = Number(process.env.QA_PORT || 3091);
+const server = app.listen(port, "127.0.0.1", () =>
+  console.log(`QA temporário: http://127.0.0.1:${port}`),
 );
 process.on("SIGINT", () =>
   server.close(() => {

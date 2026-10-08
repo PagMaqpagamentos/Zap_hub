@@ -126,6 +126,16 @@ export const planSchema = z
     (p) => Number(p.end.slice(0, 4)) - Number(p.start.slice(0, 4)) <= 30,
     "Período máximo: 30 anos",
   );
+export const balance = (i) => i.status === "paid" ? 0 : Math.max(0, i.amount - (i.paidAmount || 0));
+export const invoiceEditSchema = z.object({
+  name: text, number: text, clientId: z.string().uuid(), planId: z.string().uuid(),
+  reference: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, "Referência inválida"),
+  due: date, amount: z.number().int().min(1).max(100000000),
+  status: z.enum(["pending", "paid", "cancelled"]),
+  note: z.string().trim().max(1000).default(""),
+  paidAt: z.union([date, z.literal("")]),
+  revision: z.string(),
+});
 export const FIELDS = [
   "nome_cliente",
   "empresa",
@@ -195,7 +205,7 @@ export function render(
     cpf: client.cpf,
     nome_fatura: invoice.name,
     numero_fatura: invoice.number,
-    valor: money(invoice.amount),
+    valor: money(balance(invoice)),
     referencia: invoice.reference.split("-").reverse().join("/"),
     vencimento: brDate(invoice.due),
     link_pagamento:

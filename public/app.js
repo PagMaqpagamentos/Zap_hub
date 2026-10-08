@@ -56,10 +56,20 @@ const status = (i) =>
       ? "overdue"
       : "pending"
     : i.status;
+const balance = i => i.status === "paid" ? 0 : Math.max(0, i.amount - (i.paidAmount || 0));
+function planInvoice(p) {
+  const all = state.invoices.filter(i => i.planId === p.id && i.status !== "cancelled").sort((a,b) => a.due.localeCompare(b.due) || a.reference.localeCompare(b.reference));
+  const current = all.filter(i => i.due.slice(0,7) <= state.today.slice(0,7));
+  return current.find(i => i.status === "pending") || current.at(-1) || all[0];
+}
+const searchMatch = values => values.join(" ").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().includes(search.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase());
+function statusFilter() {
+  return `<select id="filter" aria-label="Filtrar status">${[["all","Todos os status"],["pending","Aguardando pagamento"],["overdue","Em atraso"],["paid","Pago"],["cancelled","Cancelada"]].map(([v,l]) => `<option value="${v}" ${filter===v?"selected":""}>${l}</option>`).join("")}</select>`;
+}
 const labels = {
-  pending: "Em aberto",
-  overdue: "Vencida",
-  paid: "Paga",
+  pending: "Aguardando pagamento",
+  overdue: "Em atraso",
+  paid: "Pago",
   cancelled: "Cancelada",
   simulated: "Simulado",
   sent: "Enviado à Uazapi",
@@ -141,7 +151,7 @@ function empty(title, description, action, label) {
 }
 function invoiceTable(items) {
   return items.length
-    ? `<div class="table-wrap"><table><thead><tr><th>Cliente / Fatura</th><th>Referência</th><th>Vencimento</th><th>Valor</th><th>Status</th><th></th></tr></thead><tbody>${items.map((i) => `<tr><td><strong>${esc(client(i.clientId)?.name)}</strong><small>${esc(i.name)}</small></td><td>${ref(i.reference)}</td><td>${date(i.due)}</td><td><strong>${brl(i.amount)}</strong></td><td>${badge(status(i))}</td><td>${btn("Detalhes ↗", "invoice", i.id)}</td></tr>`).join("")}</tbody></table></div>`
+    ? `<div class="table-wrap"><table><thead><tr><th>Cliente / Fatura</th><th>Referência</th><th>Vencimento</th><th>Valor</th><th>Status</th><th></th></tr></thead><tbody>${items.map((i) => `<tr><td><strong>${esc(client(i.clientId)?.name)}</strong><small>${esc(client(i.clientId)?.company)}</small><small>${esc(i.name)}</small></td><td>${ref(i.reference)}</td><td>${date(i.due)}</td><td><strong>${brl(i.amount)}</strong><small>Recebido: ${brl(i.paidAmount ?? (i.status === "paid" ? i.amount : 0))}</small><small>Saldo: ${brl(balance(i))}</small></td><td>${badge(status(i))}</td><td>${btn("Detalhes ↗", "invoice", i.id)} ${btn("Editar", "invoice-edit", i.id)}</td></tr>`).join("")}</tbody></table></div>`
     : empty(
         "Tudo começa com uma cobrança",
         "Cadastre um cliente e crie sua primeira cobrança. As faturas aparecerão aqui.",
@@ -158,7 +168,7 @@ function content() {
       overdue = invoices.filter((i) => status(i) === "overdue"),
       paid = current.filter((i) => i.status === "paid");
     const sum = (a) => a.reduce((n, i) => n + i.amount, 0);
-    return `${state.settings.mode === "simulation" ? '<div class="notice"><span class="notice-icon">◉</span><div><strong>Seu espaço está em modo de simulação</strong>Explore os lembretes sem enviar mensagens. Conecte suas contas em Integrações quando estiver pronto.</div></div>' : ""}<div class="metrics"><div class="metric featured"><div class="label">A receber no mês <span>↗</span></div><div class="value">${brl(sum(pending))}</div><div class="hint">${pending.length} faturas em aberto · ${ref(month)}</div></div><div class="metric"><div class="label">Recebido no mês <span>✓</span></div><div class="value">${brl(sum(paid))}</div><div class="hint">${paid.length} faturas da referência quitadas</div></div><div class="metric"><div class="label">Total em atraso <span>◷</span></div><div class="value">${brl(sum(overdue))}</div><div class="hint">${overdue.length} faturas aguardando pagamento</div></div><div class="metric"><div class="label">Clientes ativos <span>♧</span></div><div class="value">${state.clients
+    return `${state.settings.mode === "simulation" ? '<div class="notice"><span class="notice-icon">◉</span><div><strong>Seu espaço está em modo de simulação</strong>Explore os lembretes sem enviar mensagens. Conecte suas contas em Integrações quando estiver pronto.</div></div>' : ""}<div class="metrics"><div class="metric featured"><div class="label">A receber no mês <span>↗</span></div><div class="value">${brl(pending.reduce((n,i)=>n+balance(i),0))}</div><div class="hint">${pending.length} faturas em aberto · ${ref(month)}</div></div><div class="metric"><div class="label">Recebido no mês <span>✓</span></div><div class="value">${brl(state.invoices.filter(i=>i.reference===month).reduce((n,i)=>n+(i.paidAmount ?? (i.status==="paid" ? i.amount : 0)),0))}</div><div class="hint">${paid.length} faturas da referência quitadas</div></div><div class="metric"><div class="label">Total em atraso <span>◷</span></div><div class="value">${brl(overdue.reduce((n,i)=>n+balance(i),0))}</div><div class="hint">${overdue.length} faturas aguardando pagamento</div></div><div class="metric"><div class="label">Clientes ativos <span>♧</span></div><div class="value">${state.clients
       .filter((c) => c.active)
       .length.toString()
       .padStart(
@@ -213,23 +223,13 @@ function content() {
             "Cadastrar cliente",
           )
     }</section>`;
-  if (page === "plans")
-    return `<div class="notice"><span class="notice-icon">↻</span><div><strong>Uma cobrança, várias referências mensais</strong>As faturas são geradas até dois meses à frente. Alterações de valor e vencimento valem para as próximas faturas ainda não geradas.</div></div><section class="card">${state.plans.length ? `<div class="table-wrap"><table><thead><tr><th>Cobrança / Cliente</th><th>Valor mensal</th><th>Vencimento</th><th>Período</th><th>Status</th><th></th></tr></thead><tbody>${state.plans.map((p) => `<tr><td><strong>${esc(p.name)}</strong><small>${esc(client(p.clientId)?.name)}</small></td><td>${brl(p.amount)}</td><td>Dia ${p.day}</td><td>${date(p.start)} → ${date(p.end)}</td><td>${badge(p.active ? "paid" : "cancelled", p.active ? "Ativa" : "Pausada")}</td><td>${btn("Editar", "plan", p.id)}</td></tr>`).join("")}</tbody></table></div>` : empty("Recebimentos mais previsíveis", "Crie uma cobrança mensal com início, término e vencimento.", "plan", "Nova cobrança")}</section>`;
+  if (page === "plans") {
+    const plans = state.plans.filter(p => searchMatch([p.name,client(p.clientId)?.name,client(p.clientId)?.company,String(p.day),date(p.start),date(p.end),...state.invoices.filter(i=>i.planId===p.id).flatMap(i=>[i.name,i.number,i.due,date(i.due),ref(i.reference)])]) && (filter === "all" || (planInvoice(p) && status(planInvoice(p)) === filter)));
+    const credits = (state.payments || []).filter(p => p.remaining > 0);
+    return `<div class="notice"><span class="notice-icon">↻</span><div><strong>Acompanhe cada cobrança e suas faturas</strong>O status considera a primeira fatura aberta até o mês atual. Se estiverem quitadas, mostra Pago; sem fatura nesse período, mostra a próxima. A automação ativa ou pausada aparece separadamente.</div></div><div class="toolbar"><input id="search" value="${esc(search)}" placeholder="Buscar cobrança, vencimento, cliente ou empresa" aria-label="Buscar cobranças">${statusFilter()}</div>${credits.length ? `<section class="card"><div class="card-body"><h2>Créditos de pagamentos</h2>${credits.map(p=>`<p>${esc(client(p.clientId)?.name)} · ${esc(plan(p.planId)?.name)}: ${brl(p.remaining)} disponíveis para as próximas faturas da mesma cobrança.</p>`).join("")}</div></section>` : ""}<section class="card">${plans.length ? `<div class="table-wrap"><table class="plans-table"><thead><tr><th>Cobrança</th><th>Cliente / Empresa</th><th>Valor mensal</th><th>Vencimento / Período</th><th>Pagamento / Referência</th><th>Automação</th><th></th></tr></thead><tbody>${plans.map(p => {const i=planInvoice(p);return `<tr><td><strong>${esc(p.name)}</strong></td><td>${esc(client(p.clientId)?.name)}<small>${esc(client(p.clientId)?.company)}</small></td><td>${brl(p.amount)}</td><td>Dia ${p.day}<small>${date(p.start)} → ${date(p.end)}</small></td><td>${i ? badge(status(i))+`<small>${ref(i.reference)} · vence ${date(i.due)}</small><small>Saldo: ${brl(balance(i))}</small>` : badge("gray","Sem faturas")}</td><td>${badge(p.active ? "paid" : "cancelled",p.active ? "Ativa" : "Pausada")}</td><td>${btn("Faturas", "plan-invoices", p.id)} ${btn("Editar", "plan", p.id)}</td></tr>`;}).join("")}</tbody></table></div>` : empty("Nenhuma cobrança encontrada", "Ajuste a busca ou cadastre uma cobrança.", "plan", "Nova cobrança")}</section>`;
+  }
   if (page === "invoices")
-    return `<div class="toolbar"><input id="search" value="${esc(search)}" placeholder="Buscar cliente, fatura ou referência" aria-label="Buscar faturas"><select id="filter" aria-label="Filtrar status">${[
-      ["all", "Todos os status"],
-      ["pending", "Em aberto"],
-      ["overdue", "Vencidas"],
-      ["paid", "Pagas"],
-      ["cancelled", "Canceladas"],
-    ]
-      .map(
-        ([v, l]) =>
-          `<option value="${v}" ${filter === v ? "selected" : ""}>${l}</option>`,
-      )
-      .join(
-        "",
-      )}</select>${btn("↻ Atualizar faturas", "generate")}</div><section class="card">${invoiceTable(state.invoices.filter((i) => (filter === "all" || status(i) === filter) && [i.name, i.number, ref(i.reference), client(i.clientId)?.name].join(" ").toLowerCase().includes(search.toLowerCase())).sort((a, b) => a.due.localeCompare(b.due)))}</section>`;
+    return `<div class="toolbar"><input id="search" value="${esc(search)}" placeholder="Buscar fatura, vencimento, cliente ou empresa" aria-label="Buscar faturas">${statusFilter()}${btn("↻ Atualizar faturas", "generate")}</div><section class="card">${invoiceTable(state.invoices.filter(i => (filter === "all" || status(i) === filter) && searchMatch([i.name,i.number,ref(i.reference),i.due,date(i.due),client(i.clientId)?.name,client(i.clientId)?.company])).sort((a,b)=>a.due.localeCompare(b.due)))}</section>`;
   if (page === "rules")
     return `${dailyScheduleCard()}<div class="notice"><span class="notice-icon">☷</span><div><strong>Mensagens com a sua voz</strong>Use os campos disponíveis para personalizar cada aviso. O aviso de bloqueio apenas comunica o cliente; não bloqueia serviços externos.</div></div><div class="rule-list">${state.rules.map((r) => `<article class="rule"><div class="timing">${ruleTiming(r)}</div><h2>${esc(r.name)}</h2><pre>${esc(r.template)}</pre><div class="actions">${badge(r.active ? "paid" : "cancelled", r.active ? "Ativo" : "Pausado")}${btn("Personalizar →", "rule", r.id)}</div></article>`).join("")}</div><p class="help">A mensagem muda conforme a etapa e repete diariamente nos horários escolhidos. No vencimento, o aviso do dia também informa o prazo de bloqueio. Depois, o aviso de atraso continua até pagar ou terminar a cobrança. Um lembrete personalizado substitui a mensagem da etapa no seu dia, sem aumentar a quantidade diária.</p>`;
   if (page === "history")
@@ -311,12 +311,16 @@ function updatePreview() {
     (_, k) => samples[k] || "[campo desconhecido]",
   );
 }
+function invoiceEditor(id) {
+  const i = state.invoices.find(i=>i.id===id);
+  modal("Editar fatura", `<form id="invoice-editor" data-id="${esc(id)}"><div class="form-grid"><label class="field">Cliente<select name="clientId" id="invoice-client">${state.clients.filter(c=>!c.deletedAt || c.id===i.clientId).map(c=>`<option value="${c.id}" ${c.id===i.clientId?"selected":""}>${esc(c.name)}</option>`).join("")}</select></label>${field("Empresa do cadastro", "companyDisplay", client(i.clientId)?.company, "text", "readonly")}<label class="field full">Cobrança recorrente<select name="planId" id="invoice-plan">${state.plans.filter(p=>p.clientId===i.clientId).map(p=>`<option value="${p.id}" ${p.id===i.planId?"selected":""}>${esc(p.name)}</option>`).join("")}</select></label>${field("Nome da fatura","name",i.name,"text","required maxlength=150")}${field("Número da fatura","number",i.number,"text","required maxlength=150")}${field("Referência","reference",i.reference,"month","required")}${field("Vencimento","due",i.due,"date","required")}${field("Valor total (R$)","amount",(i.amount/100).toFixed(2),"number","required min=0.01 max=1000000 step=0.01")}<label class="field">Status<select name="status">${[["pending","Aguardando pagamento (atraso calculado pelo vencimento)"],["paid","Pago"],["cancelled","Cancelada"]].map(([v,l])=>`<option value="${v}" ${v===i.status?"selected":""}>${l}</option>`).join("")}</select></label>${field("Data do pagamento","paidAt",i.paidAt?.slice(0,10)||"","date")}<label class="field full">Observação / Justificativa<textarea name="note" maxlength="1000">${esc(i.note||"")}</textarea></label><input type="hidden" name="revision" value="${esc(i.revision || i.updatedAt || i.created || "")}"><p class="help full">Recebido: ${brl(i.paidAmount ?? (i.status==="paid" ? i.amount : 0))}. Saldo: ${brl(balance(i))}. As alterações valem apenas para esta fatura. O link será atualizado quando necessário; um link já enviado pode ainda ser pago, e o valor será conciliado pela ordem das faturas. Dados da transação são preservados.</p></div><div class="inline-error" role="alert"></div><div class="form-actions">${btn("Cancelar","close")}<button class="primary">Salvar fatura</button></div></form>`);
+}
 async function invoiceDetail(id) {
   const i = state.invoices.find((i) => i.id === id),
     previews = await api("/preview/" + id);
   modal(
     "Detalhes da fatura",
-    `<div class="detail-list"><div><small>Cliente</small>${esc(client(i.clientId)?.name)}</div><div><small>Número</small>${esc(i.number)}</div><div><small>Referência / Vencimento</small>${ref(i.reference)} · ${date(i.due)}</div><div><small>Valor / Status</small>${brl(i.amount)} ${badge(status(i))}</div></div>${i.paymentUrl ? `<p><a href="${esc(i.paymentUrl)}" target="_blank" rel="noopener noreferrer">Abrir link de pagamento ↗</a></p>` : ""}${i.note ? `<p class="help">Justificativa: ${esc(i.note)}</p>` : ""}<div class="actions">${i.status === "pending" ? btn("Gerar link de pagamento", "link", i.id) + btn("Registrar pagamento", "paid", i.id) + btn("Cancelar fatura", "cancelled", i.id, "danger") : ""}</div><div class="subsection">Prévias das mensagens</div>${previews.map((p) => `<h3>${esc(p.name)}</h3><div class="preview">${esc(p.text)}</div>`).join("")}`,
+    `<div class="detail-list"><div><small>Cliente</small>${esc(client(i.clientId)?.name)}</div><div><small>Empresa</small>${esc(client(i.clientId)?.company)}</div><div><small>Número</small>${esc(i.number)}</div><div><small>Referência / Vencimento</small>${ref(i.reference)} · ${date(i.due)}</div><div><small>Valor / Status</small>${brl(i.amount)} ${badge(status(i))}<small>Recebido: ${brl(i.paidAmount ?? (i.status === "paid" ? i.amount : 0))} · Saldo: ${brl(balance(i))}</small></div></div>${i.paymentUrl ? `<p><a href="${esc(i.paymentUrl)}" target="_blank" rel="noopener noreferrer">Abrir link de pagamento ↗</a></p>` : ""}${i.note ? `<p class="help">Justificativa: ${esc(i.note)}</p>` : ""}<div class="actions">${btn("Editar fatura", "invoice-edit", i.id)}${i.status === "pending" ? btn("Gerar link de pagamento", "link", i.id) + btn("Registrar pagamento", "paid", i.id) + btn("Cancelar fatura", "cancelled", i.id, "danger") : ""}</div><div class="subsection">Prévias das mensagens</div>${previews.map((p) => `<h3>${esc(p.name)}</h3><div class="preview">${esc(p.text)}</div>`).join("")}`,
   );
 }
 document.addEventListener("click", async (e) => {
@@ -333,12 +337,14 @@ document.addEventListener("click", async (e) => {
   e.preventDefault();
   const { action, id } = button.dataset;
   try {
+    if (action === "invoice-edit") return invoiceEditor(id);
+    if (action === "plan-invoices") return modal("Faturas · " + plan(id).name, invoiceTable(state.invoices.filter(i=>i.planId===id).sort((a,b)=>a.due.localeCompare(b.due))));
     if (action === "import-clients") {
       modal("Importar clientes", `<form id="import-clients"><p>Selecione o arquivo JSON de clientes preparado a partir da planilha. Cadastros existentes serão preservados. Esta importação não cria faturas nem envia mensagens.</p><input type="file" name="file" accept=".json" required><div class="inline-error" role="alert"></div><div class="form-actions"><button class="primary">Importar</button></div></form>`);
       return;
     }
     if (action === "delete-client") {
-      const count = state.invoices.filter(i => i.clientId === id && i.due > state.today && i.status !== "paid").length;
+      const count = state.invoices.filter(i => i.clientId === id && i.due > state.today && i.status !== "paid" && !(i.paidAmount > 0)).length;
       if (!confirm(`Excluir ${client(id)?.name}? Serão removidas ${count} faturas futuras não pagas e interrompidas as cobranças desse cliente. Pagamentos e faturas até hoje serão preservados no histórico.`)) return;
       const result = await api("/clients/" + id, undefined, "DELETE");
       await refresh();
@@ -443,6 +449,12 @@ document.addEventListener("submit", async (e) => {
   if (error) error.textContent = "";
   if (button) button.disabled = true;
   try {
+    if (form.id === "invoice-editor") {
+      data.amount = Math.round(Number(data.amount) * 100);
+      delete data.companyDisplay;
+      await api("/invoices/" + form.dataset.id, data, "PUT");
+      dialog.close(); await refresh(); toast("Fatura atualizada."); return;
+    }
     if (form.id === "import-clients") {
       const rows = JSON.parse(await fd.get("file").text());
       const result = await api("/clients/import", { rows });
@@ -520,6 +532,11 @@ document.addEventListener("input", (e) => {
   }
 });
 document.addEventListener("change", (e) => {
+  if (e.target.id === "invoice-client") {
+    const id=e.target.value;
+    $('[name="companyDisplay"]').value=client(id)?.company || "";
+    $("#invoice-plan").innerHTML=state.plans.filter(p=>p.clientId===id).map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("");
+  }
   if (e.target.id === "dailyCount") {
     const previous = [...document.querySelectorAll('[name="sendTime"]')].map(
       (el) => el.value,
@@ -554,3 +571,11 @@ boot().catch((e) => {
     '<div class="auth-wrap"><div class="auth-card"><h1>Não foi possível conectar</h1><p>Verifique se o servidor Zap Hub está em execução e recarregue a página.</p></div></div>';
   toast(e.message);
 });
+// Atualizar baixas confirmadas sem interromper formulários em edição.
+let refreshingPayments = false;
+setInterval(async () => {
+  if (!state || dialog.open || document.visibilityState !== "visible" || refreshingPayments || ["INPUT","SELECT","TEXTAREA"].includes(document.activeElement?.tagName)) return;
+  refreshingPayments = true;
+  try { await refresh(); } catch { /* A próxima atualização tentará novamente. */ }
+  finally { refreshingPayments = false; }
+}, 30000);
