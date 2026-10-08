@@ -34,6 +34,15 @@ export function createApp(
     sessions = new Map(),
     attempts = new Map();
   app.disable("x-powered-by");
+  app.get("/p/:id", (req, res) => {
+    res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex, nofollow" });
+    if (!/^[a-f0-9]{32}$/.test(req.params.id)) return res.sendStatus(404);
+    const entry = store.get("paymentLinks", req.params.id);
+    if (!entry) return res.sendStatus(404);
+    const url = new URL(entry.url);
+    if (url.protocol !== "https:") return res.sendStatus(400);
+    res.redirect(302, url.href);
+  });
   app.get("/healthz", (req, res) => {
     store.db.prepare("SELECT 1").get();
     res.json({ status: "ok" });
@@ -208,8 +217,8 @@ export function createApp(
         : randomUUID();
       if (req.body.id && !store.get(kind, id))
         return res.status(404).json({ error: "Registro não encontrado" });
-      if (kind === "clients" && store.get(kind, id)?.deletedAt)
-        return res.status(409).json({ error: "Cliente excluído não pode ser reativado" });
+      if (["clients", "plans"].includes(kind) && store.get(kind, id)?.deletedAt)
+        return res.status(409).json({ error: "Registro excluído não pode ser reativado" });
       if (kind === "plans" && (!store.get("clients", parsed.clientId) || store.get("clients", parsed.clientId).deletedAt))
         return res.status(400).json({ error: "Cliente não encontrado" });
       if (
@@ -325,6 +334,7 @@ export function createApp(
   app.post("/api/integration-tests", async (req, res) => {
     const input = z.object({
       id: z.string().uuid(), kind: z.enum(["standalone", "invoice"]),
+      name: z.string().trim().min(1).max(150).default("Fatura de teste"),
       amount: z.number().int().min(1).max(100000000).default(100),
       invoiceId: z.string().uuid().optional(),
       sendWhatsapp: z.boolean().default(false),
@@ -363,6 +373,11 @@ export function createApp(
       store.db.exec("COMMIT");
       res.json(result);
     } catch (e) { store.db.exec("ROLLBACK"); throw e; }
+  });
+  app.delete("/api/plans/:id", (req, res) => {
+    const result = store.deletePlan(req.params.id, today());
+    if (!result) return res.status(404).json({ error: "Cobrança não encontrada" });
+    res.json(result);
   });
   app.delete("/api/clients/:id", (req, res) => {
     const result = store.deleteClient(req.params.id, today());

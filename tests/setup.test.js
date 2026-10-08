@@ -118,3 +118,12 @@ test("API de teste exige login, valida entrada e confirma webhook separado",asyn
  assert.equal((await post("/webhooks/infinitepay",{order_nsu:result.orderId,transaction_nsu:"integration",slug:"test"})).status,200);
  await processWebhooks();assert.equal(store.get("integrationTests",input.id).status,"paid");assert.equal(store.invoices().length,0);
 });
+
+test("link público redireciona somente identificadores registrados",async t=>{
+ const dir=mkdtempSync(join(tmpdir(),"zap-hub-link-"));const {app,store}=createApp(dir);
+ const server=app.listen(0,"127.0.0.1");await new Promise(r=>server.once("listening",r));t.after(async()=>{await new Promise(r=>server.close(r));store.db.close();rmSync(dir,{recursive:true,force:true});});
+ const base=`http://127.0.0.1:${server.address().port}`;const id="a".repeat(32),target="https://checkout.infinitepay.io/loja?lenc=original";
+ store.put("paymentLinks",id,{id,url:target});
+ const result=await fetch(base+"/p/"+id,{redirect:"manual"});assert.equal(result.status,302);assert.equal(result.headers.get("location"),target);assert.equal(result.headers.get("cache-control"),"no-store");
+ assert.equal((await fetch(base+"/p/"+"b".repeat(32))).status,404);assert.equal((await fetch(base+"/p/invalid")).status,404);
+});

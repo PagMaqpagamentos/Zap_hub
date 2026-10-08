@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
 import {
   addDays,
   render,
@@ -7,6 +7,8 @@ import {
   ruleKind,
   scheduledSlot,
   balance,
+  brDate,
+  money,
 } from "./domain.js";
 export async function request(url, body, headers = {}) {
   const response = await fetch(url, {
@@ -25,6 +27,12 @@ export async function request(url, body, headers = {}) {
 export function createBilling(store, http = request) {
   let running = false;
   const linkLocks = new Map();
+  function paymentLink(url) {
+    const existing = store.all("paymentLinks").find(item => item.url === url);
+    const id = existing?.id || randomBytes(16).toString("hex");
+    if (!existing) store.put("paymentLinks", id, { id, url });
+    return store.settings().publicUrl + "/p/" + id;
+  }
   async function link(id) {
     if (linkLocks.has(id)) return linkLocks.get(id);
     const task = (async () => {
@@ -220,6 +228,7 @@ export function createBilling(store, http = request) {
               continue;
             }
             text = render(r.template, fresh, c, p, now, blockDays);
+            text = text.replaceAll(fresh.paymentUrl, paymentLink(fresh.paymentUrl));
             data.text = text;
             store.db
               .prepare(
@@ -229,7 +238,7 @@ export function createBilling(store, http = request) {
             status = "uncertain";
             const result = await http(
               s.uazapiUrl + "/send/text",
-              { number: c.phone, text },
+              { number: c.phone, text, linkPreview: false },
               { token: store.unseal(s.uazapiToken) },
             );
             if (result.error || result.success === false)
@@ -296,9 +305,26 @@ export function createBilling(store, http = request) {
       if (input.sendWhatsapp) {
         test.whatsappStatus = "uncertain";
         saveTest();
+        const invoice = input.kind === "invoice" ? store.invoice(input.invoiceId) : null;
+        const customer = invoice ? store.get("clients", invoice.clientId) : null;
+        test.messageLink = paymentLink(test.paymentUrl);
+        test.message = [
+          customer ? `Olá, ${customer.name}!` : "Olá!",
+          "", "Sua fatura está disponível para pagamento.", "",
+          customer ? `Empresa: ${customer.company}` : "Cobrança demonstrativa — teste de integração",
+          `Fatura: ${invoice?.name || input.name || "Fatura de teste"}`,
+          `Número: ${invoice?.number || "TESTE-" + test.id.slice(0,8).toUpperCase()}`,
+          `Referência: ${(invoice?.reference || today().slice(0,7)).split("-").reverse().join("/")}`,
+          `Vencimento: ${brDate(invoice?.due || today())}`,
+          `Valor a pagar: ${money(test.amount)}`, "",
+          "Pagar via Pix:", test.messageLink,
+          "No checkout, escolha Pix para visualizar o QR Code e o Copia e Cola.",
+        ].join("\n");
+        saveTest();
         const result = await http(s.uazapiUrl + "/send/text", {
           number: test.phone,
-          text: `Teste de cobrança Zap Hub. Valor: ${(test.amount / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}. Para pagar via Pix, acesse o checkout InfinitePay e escolha Pix: ${test.paymentUrl}`,
+          text: test.message,
+          linkPreview: false,
         }, { token: store.unseal(s.uazapiToken) });
         if (result.error || result.success === false) throw new Error("Uazapi não confirmou o envio. Confira no provedor antes de repetir.");
         test.whatsappStatus = "sent";

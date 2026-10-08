@@ -157,7 +157,7 @@ test("modo real gera link em centavos e envia uma só vez mesmo com chamadas con
   assert.equal(calls.length, 2);
   assert.equal(calls[0].body.items[0].price, 14990);
   assert.equal(calls[1].headers.token, "segredo");
-  assert.match(calls[1].body.text, /https:\/\/checkout/);
+  assert.match(calls[1].body.text, /https:\/\/hub\.example\.com\/p\/[a-f0-9]{32}/);
   assert.equal(s.deliveries()[0].status, "sent");
 });
 test("resposta incerta da Uazapi não provoca reenvio automático", async (t) => {
@@ -361,7 +361,7 @@ test("teste separado envia WhatsApp real uma vez em simulação e não altera fa
   const before=JSON.stringify(s.invoices());
   const result=await b.integrationTest(input);await b.integrationTest(input);
   assert.equal(result.whatsappStatus,"sent");assert.equal(calls.length,2);assert.equal(calls[0].body.items[0].price,100);
-  assert.equal(calls[1].body.number,input.phone);assert.ok(calls[1].body.text.includes(result.paymentUrl));
+  assert.equal(calls[1].body.linkPreview,false);assert.ok(calls[1].body.text.includes("Referência:"));assert.equal(calls[1].body.number,input.phone);assert.ok(calls[1].body.text.includes(result.messageLink));
   await b.confirm({order_nsu:result.orderId,transaction_nsu:"teste",slug:"s"});await b.confirm({order_nsu:result.orderId,transaction_nsu:"teste",slug:"s"});
   assert.equal(s.get("integrationTests",input.id).status,"paid");assert.equal(s.all("testPayments").length,1);
   assert.equal(JSON.stringify(s.invoices()),before);assert.equal(s.all("payments").length,0);assert.equal(s.settings().mode,"simulation");
@@ -383,4 +383,13 @@ test("envio de teste incerto preserva link e não repete ao repetir requisição
   const input={id:randomUUID(),kind:"standalone",amount:100,phone:"5511999999999",sendWhatsapp:true};
   const result=await b.integrationTest(input);await b.integrationTest(input);
   assert.equal(result.whatsappStatus,"uncertain");assert.ok(result.paymentUrl);assert.equal(sends,1);
+});
+
+
+test("excluir cobrança remove futuras sem recebimentos e preserva histórico",t=>{
+ const {s,c,p}=fixture(t);s.generate("2026-10-01");
+ const partial=s.invoices().find(i=>i.reference==="2026-11");s.saveInvoice({...partial,paidAmount:100});
+ assert.deepEqual(s.deletePlan(p.id,"2026-10-10"),{removed:1});
+ assert.equal(s.invoices().length,2);assert.equal(s.get("clients",c.id).active,true);assert.equal(s.get("plans",p.id).active,false);
+ assert.ok(s.get("plans",p.id).deletedAt);assert.equal(s.generate("2026-12-01"),0);assert.equal(s.deletePlan(p.id,"2026-10-10"),null);
 });

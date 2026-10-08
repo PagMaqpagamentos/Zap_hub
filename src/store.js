@@ -215,6 +215,18 @@ export function createStore(dir) {
         db.exec("COMMIT");
       } catch (e) { db.exec("ROLLBACK"); throw e; }
     },
+    deletePlan(id, now) {
+      const p = get("plans", id);
+      if (!p || p.deletedAt) return null;
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        put("plans", id, { ...p, active: false, deletedAt: new Date().toISOString() });
+        const future = invoices().filter(i => i.planId === id && i.due > now && i.status !== "paid" && !(i.paidAmount > 0));
+        for (const i of future) db.prepare("DELETE FROM invoices WHERE id=?").run(i.id);
+        event("cobranca", `Cobrança excluída: ${p.name}. ${future.length} faturas futuras removidas; histórico preservado.`);
+        db.exec("COMMIT"); return { removed: future.length };
+      } catch (e) { db.exec("ROLLBACK"); throw e; }
+    },
     deleteClient(id, now) {
       const c = get("clients", id);
       if (!c || c.deletedAt) return null;

@@ -103,3 +103,11 @@ Documentação do gateway: https://www.infinitepay.io/checkout-documentacao
 ## Testes das integrações
 
 Em Integrações, a seção Testar Pix e WhatsApp gera um checkout real mesmo no modo simulação, sem ativar a rotina. O teste separado usa R$ 1,00 por padrão, aceita outro valor e mantém os recebimentos de teste fora das faturas e créditos dos clientes. O teste de fatura existente cobra seu saldo e usa a conciliação normal por ordem de vencimento. O envio opcional usa o telefone informado e exige Uazapi configurada. Os resultados mostram link, confirmação de pagamento, situação do WhatsApp, faturas afetadas e saldo. A aceitação pela Uazapi não comprova entrega ou leitura. Uma requisição repetida com o mesmo ID não repete a criação nem o envio. Em caso de envio incerto, o link fica disponível e não há repetição automática. O pagamento é realizado pelo usuário no checkout.
+
+## Exclusão de cobranças e mensagem de pagamento
+
+Excluir uma cobrança arquiva a recorrência, impede sua reativação e remove somente faturas futuras sem recebimentos. Pagamentos, recebimentos parciais e vencimentos até hoje são preservados. O cadastro do cliente permanece.
+
+Os envios usam linkPreview=false (Uazapi) e um endereço /p/ com identificador aleatório de 128 bits, que redireciona ao checkout original sem expor seus parâmetros na mensagem. Isso remove a prévia automática; não modifica proteções do gateway ao abrir o checkout. Os testes de fatura incluem nome do cliente, empresa, fatura, número, referência, vencimento e saldo. O teste separado é identificado como demonstrativo e permite informar seu nome.
+
+A documentação pública consultada da InfinitePay descreve checkout por link e webhook, sem endpoint de emissão direta do QR Code Pix/BR Code. O link de checkout não é código Pix Copia e Cola. QR Code Pix direto depende de contrato específico do provedor que devolva esses dados com conciliação.
