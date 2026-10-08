@@ -25,17 +25,21 @@ Acesse http://127.0.0.1:3090 e crie a senha de administrador (mínimo de 10 cara
 - Dias 29–31 são ajustados ao último dia dos meses curtos.
 - As datas de início e término limitam vencimentos **e envios**. Um aviso anterior ao início só se torna elegível no início. Após o término, nenhum aviso é enviado, inclusive de atraso.
 - Alterar uma cobrança só afeta faturas ainda não geradas. Para corrigir faturas emitidas, cancele-as e cadastre uma nova cobrança com o período correto. Cancelamento não estorna pagamento nem invalida checkout no provedor.
-- Lembretes globais, aplicados a todas as cobranças: negativos antes do vencimento, zero no dia, positivos após. Padrões: -5, 0 e +5 dias. Cada intervalo permite um lembrete ativo; novos lembretes no mesmo dia são rejeitados.
-- Cada lembrete é processado uma vez por fatura e modo. Editar seu texto não reenvia lembretes já processados. Se o servidor ficar indisponível, recupera apenas o lembrete mais recente elegível para cada fatura.
+- Em **Lembretes → Frequência dos avisos**, configure de 1 a 12 envios por dia, cada um com seu horário de Brasília. A mesma configuração também aparece em Integrações. O padrão inicial é 1 vez por dia às 09:00; instalações anteriores preservam seu horário inicial.
+- Disponibilidade: todos os dias desde 5 dias antes até a véspera do vencimento. Vencimento: no próprio dia, nos horários configurados, já informando a data prevista de bloqueio. Atraso: todos os dias desde o dia seguinte ao vencimento; +5 define o prazo previsto de bloqueio, não o primeiro envio. Os avisos continuam após esse prazo, com texto adequado, até pagamento ou término da cobrança.
+- Os intervalos de -5 e +5 são editáveis nos modelos. Existe um modelo ativo por etapa. Lembretes personalizados substituem a mensagem da etapa somente no dia exato configurado, sem aumentar a quantidade diária.
+- Cada fatura tem no máximo uma tentativa por data, horário e modo. Editar texto ou etapa não reenvia um horário já processado. Trocar horários não ultrapassa a quantidade diária configurada, contando tentativas anteriores. Cada fatura tem sua própria contagem.
 - Simulações não chamam provedores e não impedem o envio real posterior.
 - Faturas pagas/canceladas, clientes inativos e cobranças pausadas não recebem mensagens.
-- A automação roda a cada minuto, na janela configurada até 20h, no fuso America/Sao_Paulo. Execução manual ignora a janela e a pausa da rotina.
+- A automação verifica os horários a cada minuto, no fuso America/Sao_Paulo. Após indisponibilidade, recupera somente o horário mais recente do dia, por até 30 minutos; horários/dias perdidos não são acumulados. Execução manual ignora a pausa e a tolerância de horário, mas consome o horário mais recente do dia (ou o primeiro, se ainda não chegou), sem criar um envio extra.
 - O aviso de bloqueio é apenas comunicação. Não existe bloqueio automático de serviços externos.
 - Falhas ficam no histórico. Respostas incertas não são reenviadas automaticamente: confira no provedor e libere nova tentativa pelo histórico. Aceitação pela Uazapi não comprova entrega ou leitura.
 
 ## Campos de mensagem
 
-`{{nome_cliente}}`, `{{empresa}}`, `{{whatsapp}}`, `{{cpf}}`, `{{nome_fatura}}`, `{{numero_fatura}}`, `{{valor}}`, `{{referencia}}`, `{{vencimento}}`, `{{link_pagamento}}`, `{{inicio_cobranca}}`, `{{termino_cobranca}}`, `{{dias_atraso}}`.
+`{{nome_cliente}}`, `{{empresa}}`, `{{whatsapp}}`, `{{cpf}}`, `{{nome_fatura}}`, `{{numero_fatura}}`, `{{valor}}`, `{{referencia}}`, `{{vencimento}}`, `{{link_pagamento}}`, `{{inicio_cobranca}}`, `{{termino_cobranca}}`, `{{dias_atraso}}`, `{{data_bloqueio}}`, `{{dias_para_bloqueio}}`, `{{aviso_bloqueio}}`.
+
+O campo `{{aviso_bloqueio}}` informa o prazo e os dias restantes, muda para “termina hoje” no dia previsto e para “prazo terminou” após a data. Não afirma que houve bloqueio real. Na atualização para frequência diária, os modelos existentes são preservados e esse campo é acrescentado aos avisos padrão de vencimento e bloqueio. Histórico, autenticação e credenciais são preservados por migração do banco.
 
 ## Integrações
 
@@ -79,3 +83,9 @@ npm test
 Os testes cobrem datas, validação, recorrência, substituição de campos, duplicações, pausas, baixa de pagamento, falhas de envio, autenticação e proteção do token. Provedores são simulados; homologação com sua conta e um número de teste ainda é necessária.
 
 `node tests/preview-server.js` inicia uma instância descartável na porta 3091 para QA visual, com dados fictícios, senha de teste `Visual-Test-2026` e provedores desativados. Encerre com Ctrl+C. Nunca utilize essa instância em produção.
+
+## Clientes e importação
+
+Busca por nome, empresa, CPF/CNPJ e WhatsApp, inclusive com pontuação. Excluir oculta o cadastro, pausa suas cobranças e remove faturas não pagas com vencimento posterior ao dia atual (Brasília). Pagamentos, faturas até hoje e histórico de mensagens são preservados. Uma mensagem já aceita pelo provedor não pode ser desfeita.
+
+A importação autenticada aceita JSON com name, company, cpf, phone e active. Não altera clientes existentes, não cria cobranças e ignora duplicados por documento ou telefone. Documentos inválidos são informados por linha. Telefone pode ficar vazio; isso impede todos os avisos até o preenchimento.

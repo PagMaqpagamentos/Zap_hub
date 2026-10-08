@@ -18,6 +18,8 @@ import {
   FIELDS,
   today,
   render,
+  sendTimesSchema,
+  ruleKind,
 } from "./domain.js";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export function createApp(
@@ -118,12 +120,10 @@ export function createApp(
         (process.env.NODE_ENV === "production" ||
           !["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.ip))
       )
-        return res
-          .status(403)
-          .json({
-            error:
-              "Configure SETUP_TOKEN no servidor para liberar o primeiro acesso",
-          });
+        return res.status(403).json({
+          error:
+            "Configure SETUP_TOKEN no servidor para liberar o primeiro acesso",
+        });
       const salt = randomBytes(16).toString("hex");
       admin = { salt, hash: scryptSync(password, salt, 64).toString("hex") };
       store.put("auth", "admin", admin);
@@ -181,10 +181,16 @@ export function createApp(
       data.active &&
       store
         .all("rules")
-        .some((r) => r.id !== id && r.active && r.offset === data.offset)
+        .some(
+          (r) =>
+            r.id !== id &&
+            r.active &&
+            ruleKind(r) === data.kind &&
+            (data.kind !== "custom" || r.offset === data.offset),
+        )
     )
       throw new Error(
-        "Já existe um lembrete ativo nesse dia. Escolha outro intervalo ou pause o anterior.",
+        "Já existe um lembrete ativo nesta etapa (ou neste dia personalizado). Edite ou pause o anterior.",
       );
   }
   for (const [kind, schema] of [
@@ -199,11 +205,13 @@ export function createApp(
         : randomUUID();
       if (req.body.id && !store.get(kind, id))
         return res.status(404).json({ error: "Registro não encontrado" });
-      if (kind === "plans" && !store.get("clients", parsed.clientId))
+      if (kind === "clients" && store.get(kind, id)?.deletedAt)
+        return res.status(409).json({ error: "Cliente excluído não pode ser reativado" });
+      if (kind === "plans" && (!store.get("clients", parsed.clientId) || store.get("clients", parsed.clientId).deletedAt))
         return res.status(400).json({ error: "Cliente não encontrado" });
       if (
         kind === "clients" &&
-        store.all("clients").some((c) => c.id !== id && c.cpf === parsed.cpf)
+        store.all("clients").some((c) => !c.deletedAt && c.id !== id && c.cpf === parsed.cpf)
       )
         return res
           .status(409)
@@ -248,7 +256,7 @@ export function createApp(
       .object({
         mode: z.enum(["simulation", "live"]),
         auto: z.boolean(),
-        sendHour: z.number().int().min(0).max(19),
+        sendTimes: sendTimesSchema.optional(),
         uazapiUrl: httpsUrl,
         uazapiToken: z.string().max(2000).optional(),
         handle: z
@@ -263,6 +271,7 @@ export function createApp(
     const updated = {
       ...current,
       ...data,
+      sendTimes: data.sendTimes || current.sendTimes,
       uazapiToken: data.uazapiToken
         ? store.seal(data.uazapiToken)
         : current.uazapiToken,
@@ -283,6 +292,17 @@ export function createApp(
       `Configurações salvas. Modo: ${updated.mode}; automação: ${updated.auto ? "ativa" : "pausada"}`,
     );
     res.json(safeSettings());
+  });
+  app.put("/api/schedule", (req, res) => {
+    const { sendTimes } = z
+      .object({ sendTimes: sendTimesSchema })
+      .parse(req.body);
+    store.put("settings", "main", { ...store.settings(), sendTimes });
+    store.event(
+      "configuração",
+      `Frequência diária: ${sendTimes.length} envio(s), às ${sendTimes.join(", ")} (Brasília)`,
+    );
+    res.json({ sendTimes });
   });
   app.post("/api/uazapi/status", async (req, res) => {
     const s = store.settings();
@@ -305,6 +325,36 @@ export function createApp(
   app.post("/api/run", async (req, res) =>
     res.json(await billing.run({ force: true })),
   );
+  app.post("/api/clients/import", (req, res) => {
+    const rows = z.array(z.unknown()).min(1).max(1000).parse(req.body.rows);
+    const result = { imported: 0, duplicates: 0, errors: [] };
+    store.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const [index, row] of rows.entries()) {
+        const parsed = clientSchema.safeParse(row);
+        if (!parsed.success) {
+          result.errors.push({ row: index + 2, name: String(row?.name || ""), error: parsed.error.issues.map(i => i.message).join("; ") });
+          continue;
+        }
+        const c = parsed.data;
+        if (store.all("clients").some(existing => !existing.deletedAt && (existing.cpf === c.cpf || (c.phone && existing.phone === c.phone)))) {
+          result.duplicates++;
+          continue;
+        }
+        const id = randomUUID();
+        store.put("clients", id, { ...c, id });
+        result.imported++;
+      }
+      store.event("importacao", `${result.imported} clientes importados; ${result.duplicates} duplicados; ${result.errors.length} pendências.`);
+      store.db.exec("COMMIT");
+      res.json(result);
+    } catch (e) { store.db.exec("ROLLBACK"); throw e; }
+  });
+  app.delete("/api/clients/:id", (req, res) => {
+    const result = store.deleteClient(req.params.id, today());
+    if (!result) return res.status(404).json({ error: "Cliente não encontrado" });
+    res.json(result);
+  });
   app.get("/api/preview/:id", (req, res) => {
     const i = store.invoice(req.params.id);
     if (!i) return res.sendStatus(404);
@@ -313,7 +363,18 @@ export function createApp(
     res.json(
       store
         .all("rules")
-        .map((r) => ({ name: r.name, text: render(r.template, i, c, p) })),
+        .map((r) => ({
+          name: r.name,
+          text: render(
+            r.template,
+            i,
+            c,
+            p,
+            today(),
+            store.all("rules").find((r) => ruleKind(r) === "overdue")?.offset ??
+              5,
+          ),
+        })),
     );
   });
   app.post("/api/invoices/:id/link", async (req, res) => {

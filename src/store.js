@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
-import { defaultRules, dueDate } from "./domain.js";
+import { defaultRules, dueDate, ruleKind } from "./domain.js";
 export function createStore(dir) {
   mkdirSync(dir, { recursive: true });
   const keyPath = join(dir, "secret.key");
@@ -13,7 +13,7 @@ export function createStore(dir) {
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
  CREATE TABLE IF NOT EXISTS documents(kind TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(kind,id));
  CREATE TABLE IF NOT EXISTS invoices(id TEXT PRIMARY KEY,plan_id TEXT NOT NULL,reference TEXT NOT NULL,data TEXT NOT NULL,UNIQUE(plan_id,reference));
- CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY,invoice_id TEXT NOT NULL,rule_id TEXT NOT NULL,mode TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,UNIQUE(invoice_id,rule_id,mode));
+ CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY,invoice_id TEXT NOT NULL,rule_id TEXT NOT NULL,mode TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,scheduled_date TEXT NOT NULL,scheduled_slot TEXT NOT NULL,UNIQUE(invoice_id,scheduled_date,scheduled_slot,mode));
  CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,created TEXT NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL);`);
   const all = (k) =>
     db
@@ -69,6 +69,7 @@ export function createStore(dir) {
       mode: "simulation",
       auto: false,
       sendHour: 9,
+      sendTimes: ["09:00"],
       uazapiUrl: "",
       uazapiToken: "",
       handle: "",
@@ -77,6 +78,71 @@ export function createStore(dir) {
   if (!get("meta", "rulesSeeded")) {
     for (const r of defaultRules) put("rules", r.id, r);
     put("meta", "rulesSeeded", { done: true });
+  }
+  // Migração transacional: preserva todas as tentativas antigas e as credenciais.
+  if (
+    !db
+      .prepare("PRAGMA table_info(deliveries)")
+      .all()
+      .some((c) => c.name === "scheduled_date")
+  ) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const previous = db
+        .prepare("SELECT * FROM deliveries ORDER BY rowid")
+        .all();
+      db.exec(`ALTER TABLE deliveries RENAME TO deliveries_previous;
+        CREATE TABLE deliveries(id TEXT PRIMARY KEY,invoice_id TEXT NOT NULL,rule_id TEXT NOT NULL,mode TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,scheduled_date TEXT NOT NULL,scheduled_slot TEXT NOT NULL,UNIQUE(invoice_id,scheduled_date,scheduled_slot,mode));`);
+      const insert = db.prepare(
+        "INSERT OR IGNORE INTO deliveries VALUES(?,?,?,?,?,?,?,?)",
+      );
+      const firstTime = `${String(get("settings", "main").sendHour ?? 9).padStart(2, "0")}:00`;
+      for (const row of previous) {
+        const data = JSON.parse(row.data),
+          instant = new Date(data.created);
+        const day = Number.isNaN(instant.getTime())
+          ? "1970-01-01"
+          : new Intl.DateTimeFormat("en-CA", {
+              timeZone: "America/Sao_Paulo",
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit",
+            }).format(instant);
+        const values = [
+          row.id,
+          row.invoice_id,
+          row.rule_id,
+          row.mode,
+          row.status,
+          row.data,
+          day,
+        ];
+        if (!insert.run(...values, firstTime).changes)
+          insert.run(...values, `legacy-${row.id}`);
+      }
+      db.exec("DROP TABLE deliveries_previous; COMMIT");
+    } catch (e) {
+      db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+  const settings = get("settings", "main");
+  if (!settings.sendTimes)
+    put("settings", "main", {
+      ...settings,
+      sendTimes: [`${String(settings.sendHour ?? 9).padStart(2, "0")}:00`],
+    });
+  if (!get("meta", "dailyReminders")) {
+    for (const r of all("rules")) {
+      let template = r.template;
+      if (
+        ["vencimento", "bloqueio"].includes(r.id) &&
+        !template.includes("{{aviso_bloqueio}}")
+      )
+        template += "\n{{aviso_bloqueio}}";
+      put("rules", r.id, { ...r, kind: ruleKind(r), template });
+    }
+    put("meta", "dailyReminders", { version: 1 });
   }
   db.prepare(
     "UPDATE deliveries SET status='uncertain' WHERE status='sending'",
@@ -95,6 +161,21 @@ export function createStore(dir) {
     invoices,
     saveInvoice,
     event,
+    deleteClient(id, now) {
+      const c = get("clients", id);
+      if (!c || c.deletedAt) return null;
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        put("clients", id, { ...c, active: false, deletedAt: new Date().toISOString() });
+        for (const p of all("plans").filter((p) => p.clientId === id))
+          put("plans", p.id, { ...p, active: false });
+        const future = invoices().filter((i) => i.clientId === id && i.due > now && i.status !== "paid");
+        for (const i of future) db.prepare("DELETE FROM invoices WHERE id=?").run(i.id);
+        event("cliente", `Cliente excluído: ${c.name}. ${future.length} faturas futuras removidas.`);
+        db.exec("COMMIT");
+        return { removed: future.length };
+      } catch (e) { db.exec("ROLLBACK"); throw e; }
+    },
     settings: () => get("settings", "main"),
     logs: () =>
       db.prepare("SELECT * FROM events ORDER BY id DESC LIMIT 100").all(),
@@ -109,6 +190,8 @@ export function createStore(dir) {
           ruleId: r.rule_id,
           mode: r.mode,
           status: r.status,
+          scheduledDate: r.scheduled_date,
+          scheduledSlot: r.scheduled_slot,
         })),
     generate(now) {
       let count = 0;

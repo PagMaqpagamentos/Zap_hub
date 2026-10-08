@@ -17,6 +17,37 @@ const brl = (n) =>
     (n / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" }),
   date = (s) => s?.split("-").reverse().join("/") || "—";
 const ref = (s) => s.split("-").reverse().join("/");
+const ruleType = (r) =>
+  r.kind ||
+  { disponivel: "available", vencimento: "due", bloqueio: "overdue" }[r.id] ||
+  "custom";
+function ruleTiming(r) {
+  const kind = ruleType(r);
+  if (kind === "available")
+    return `Todos os dias, desde ${-r.offset} dias antes até a véspera`;
+  if (kind === "due") return "No vencimento, nos horários configurados";
+  if (kind === "overdue")
+    return `Diário após vencer · bloqueio previsto em +${r.offset} dias`;
+  return r.offset < 0
+    ? `Somente ${-r.offset} dias antes`
+    : r.offset === 0
+      ? "Somente no vencimento"
+      : `Somente ${r.offset} dias depois`;
+}
+function timeInputs(times) {
+  return times
+    .map((t, i) =>
+      field(`Horário ${i + 1} (Brasília)`, "sendTime", t, "time", "required"),
+    )
+    .join("");
+}
+function scheduleFields(s) {
+  const times = s.sendTimes || ["09:00"];
+  return `<div class="field full"><label class="field">Quantas vezes por dia, por fatura?<select id="dailyCount" name="dailyCount">${Array.from({ length: 12 }, (_, i) => `<option value="${i + 1}" ${times.length === i + 1 ? "selected" : ""}>${i + 1} ${i ? "vezes" : "vez"} por dia</option>`).join("")}</select></label><div class="form-grid" id="send-times">${timeInputs(times)}</div><small>Todos os dias, nos horários de Brasília. Se o servidor ficar indisponível, recupera somente o último horário por até 30 minutos; não acumula avisos perdidos.</small></div>`;
+}
+function dailyScheduleCard() {
+  return `<section class="card"><div class="card-head"><div><h2>Frequência dos avisos</h2><span class="muted">Uma programação diária para todas as etapas</span></div>${badge("gray", `${(state.settings.sendTimes || ["09:00"]).length} vez(es) por dia`)}</div><form id="schedule" class="card-body"><div class="form-grid">${scheduleFields(state.settings)}</div><div class="inline-error" role="alert"></div><div class="form-actions"><button class="primary">Salvar horários</button></div></form></section>`;
+}
 const client = (id) => state.clients.find((c) => c.id === id),
   plan = (id) => state.plans.find((p) => p.id === id);
 const status = (i) =>
@@ -103,7 +134,7 @@ function draw() {
     ["settings", "⚙", "Integrações"],
   ];
   const [title, subtitle] = headings[page];
-  app.innerHTML = `<div class="shell"><aside class="sidebar">${brand}<div class="nav-label">SEU ESPAÇO DE GESTÃO</div><nav>${nav.map(([id, icon, label]) => `<button data-page="${id}" class="${page === id ? "active" : ""}"><span class="nav-icon">${icon}</span>${label}</button>`).join("")}</nav><div class="side-foot"><strong>Menos tarefas. Mais controle.</strong><br>Clientes, cobranças e WhatsApp<br>em um só lugar.<br><br>PARATECH · ZAP HUB</div></aside><div><header class="topbar"><span>Seu negócio / <strong>${title}</strong></span><div class="right">${badge(state.settings.mode, state.settings.mode === "simulation" ? "Modo simulação" : "Modo real")}<span class="avatar">P</span>${btn("Sair", "logout")}</div></header><main><div class="heading"><div><div class="eyebrow">Organize. Conecte. Receba.</div><h1>${title}</h1><p class="muted">${subtitle}</p></div><div class="actions">${page === "clients" ? btn("＋ Novo cliente", "client", "", "primary") : page === "plans" ? btn("＋ Nova cobrança", "plan", "", "primary") : page === "rules" ? btn("＋ Novo lembrete", "rule", "", "primary") : page === "dashboard" ? btn("＋ Nova cobrança", "plan", "", "primary") : ""}</div></div>${content()}<footer class="footer"><span>Zap Hub · Gestão simples, conexões reais.</span><span>Horário de Brasília · ${date(state.today)}</span></footer></main></div></div>`;
+  app.innerHTML = `<div class="shell"><aside class="sidebar">${brand}<div class="nav-label">SEU ESPAÇO DE GESTÃO</div><nav>${nav.map(([id, icon, label]) => `<button data-page="${id}" class="${page === id ? "active" : ""}"><span class="nav-icon">${icon}</span>${label}</button>`).join("")}</nav><div class="side-foot"><strong>Menos tarefas. Mais controle.</strong><br>Clientes, cobranças e WhatsApp<br>em um só lugar.<br><br>PARATECH · ZAP HUB</div></aside><div><header class="topbar"><span>Seu negócio / <strong>${title}</strong></span><div class="right">${badge(state.settings.mode, state.settings.mode === "simulation" ? "Modo simulação" : "Modo real")}<span class="avatar">P</span>${btn("Sair", "logout")}</div></header><main><div class="heading"><div><div class="eyebrow">Organize. Conecte. Receba.</div><h1>${title}</h1><p class="muted">${subtitle}</p></div><div class="actions">${page === "clients" ? btn("Importar clientes", "import-clients") + btn("＋ Novo cliente", "client", "", "primary") : page === "plans" ? btn("＋ Nova cobrança", "plan", "", "primary") : page === "rules" ? btn("＋ Novo lembrete", "rule", "", "primary") : page === "dashboard" ? btn("＋ Nova cobrança", "plan", "", "primary") : ""}</div></div>${content()}<footer class="footer"><span>Zap Hub · Gestão simples, conexões reais.</span><span>Horário de Brasília · ${date(state.today)}</span></footer></main></div></div>`;
 }
 function empty(title, description, action, label) {
   return `<div class="empty"><div class="symbol">▤</div><h3>${title}</h3><p>${description}</p>${action ? btn(label, action, "", "primary") : ""}</div>`;
@@ -163,21 +194,16 @@ function content() {
       )
       .join(
         "",
-      )}</div></div></section><section class="card"><div class="card-body"><h2>Automação sob controle</h2><p class="help">${state.settings.mode === "simulation" ? "Simule os avisos e confira os textos no histórico." : "A rotina processa os lembretes elegíveis e envia pelo WhatsApp."}</p>${btn(state.settings.mode === "simulation" ? "▷ Simular agora" : "▷ Executar rotina agora", "run", "", "primary")}<p class="help">Janela automática: ${String(state.settings.sendHour).padStart(2, "0")}h às 20h.</p></div></section></aside></div>`;
+      )}</div></div></section><section class="card"><div class="card-body"><h2>Automação sob controle</h2><p class="help">${state.settings.mode === "simulation" ? "Simule os avisos e confira os textos no histórico." : "A rotina processa os lembretes elegíveis e envia pelo WhatsApp."}</p>${btn(state.settings.mode === "simulation" ? "▷ Simular agora" : "▷ Executar rotina agora", "run", "", "primary")}<p class="help">Envios diários: ${(state.settings.sendTimes || ["09:00"]).join(" · ")} (Brasília).</p></div></section></aside></div>`;
   }
   if (page === "clients")
-    return `<div class="toolbar"><input id="search" placeholder="Buscar por cliente, empresa ou CPF" value="${esc(search)}" aria-label="Buscar clientes"></div><section class="card">${
-      state.clients.length
-        ? `<div class="table-wrap"><table><thead><tr><th>Cliente</th><th>Empresa</th><th>WhatsApp</th><th>CPF</th><th>Status</th><th></th></tr></thead><tbody>${state.clients
-            .filter((c) =>
-              [c.name, c.company, c.cpf]
-                .join(" ")
-                .toLowerCase()
-                .includes(search.toLowerCase()),
-            )
+    return `<div class="toolbar"><input id="search" placeholder="Buscar por cliente, empresa, CPF/CNPJ ou WhatsApp" value="${esc(search)}" aria-label="Buscar clientes"></div><section class="card">${
+      state.clients.filter(c => !c.deletedAt).length
+        ? `<div class="table-wrap"><table><thead><tr><th>Cliente</th><th>Empresa</th><th>WhatsApp</th><th>CPF/CNPJ</th><th>Status</th><th></th></tr></thead><tbody>${state.clients
+            .filter((c) => !c.deletedAt && ([c.name, c.company, c.cpf, c.phone].join(" ").toLowerCase().includes(search.toLowerCase()) || (search.replace(/\D/g, "").length > 0 && [c.phone, c.cpf].some(v => (v || "").includes(search.replace(/\D/g, ""))))))
             .map(
               (c) =>
-                `<tr><td><strong>${esc(c.name)}</strong></td><td>${esc(c.company)}</td><td>+${esc(c.phone)}</td><td>${esc(c.cpf)}</td><td>${badge(c.active ? "paid" : "cancelled", c.active ? "Ativo" : "Inativo")}</td><td>${btn("Editar", "client", c.id)}</td></tr>`,
+                `<tr><td><strong>${esc(c.name)}</strong></td><td>${esc(c.company)}</td><td>${c.phone ? "+" + esc(c.phone) : "Pendente"}</td><td>${esc(c.cpf)}</td><td>${badge(c.active ? "paid" : "cancelled", c.active ? "Ativo" : "Inativo")}</td><td>${btn("Editar", "client", c.id)} ${btn("Excluir", "delete-client", c.id, "danger")}</td></tr>`,
             )
             .join("")}</tbody></table></div>`
         : empty(
@@ -205,12 +231,12 @@ function content() {
         "",
       )}</select>${btn("↻ Atualizar faturas", "generate")}</div><section class="card">${invoiceTable(state.invoices.filter((i) => (filter === "all" || status(i) === filter) && [i.name, i.number, ref(i.reference), client(i.clientId)?.name].join(" ").toLowerCase().includes(search.toLowerCase())).sort((a, b) => a.due.localeCompare(b.due)))}</section>`;
   if (page === "rules")
-    return `<div class="notice"><span class="notice-icon">☷</span><div><strong>Mensagens com a sua voz</strong>Use os campos disponíveis para personalizar cada aviso. O aviso de bloqueio apenas comunica o cliente; não bloqueia serviços externos.</div></div><div class="rule-list">${state.rules.map((r) => `<article class="rule"><div class="timing">${r.offset < 0 ? `${-r.offset} dias antes do vencimento` : r.offset === 0 ? "No dia do vencimento" : `${r.offset} dias após o vencimento`}</div><h2>${esc(r.name)}</h2><pre>${esc(r.template)}</pre><div class="actions">${badge(r.active ? "paid" : "cancelled", r.active ? "Ativo" : "Pausado")}${btn("Personalizar →", "rule", r.id)}</div></article>`).join("")}</div><p class="help">Cada lembrete é enviado uma vez por fatura. Se o servidor ficar offline, apenas o lembrete mais recente elegível é recuperado. Os avisos param no término da cobrança.</p>`;
+    return `${dailyScheduleCard()}<div class="notice"><span class="notice-icon">☷</span><div><strong>Mensagens com a sua voz</strong>Use os campos disponíveis para personalizar cada aviso. O aviso de bloqueio apenas comunica o cliente; não bloqueia serviços externos.</div></div><div class="rule-list">${state.rules.map((r) => `<article class="rule"><div class="timing">${ruleTiming(r)}</div><h2>${esc(r.name)}</h2><pre>${esc(r.template)}</pre><div class="actions">${badge(r.active ? "paid" : "cancelled", r.active ? "Ativo" : "Pausado")}${btn("Personalizar →", "rule", r.id)}</div></article>`).join("")}</div><p class="help">A mensagem muda conforme a etapa e repete diariamente nos horários escolhidos. No vencimento, o aviso do dia também informa o prazo de bloqueio. Depois, o aviso de atraso continua até pagar ou terminar a cobrança. Um lembrete personalizado substitui a mensagem da etapa no seu dia, sem aumentar a quantidade diária.</p>`;
   if (page === "history")
-    return `<div class="heading"><p class="muted">Últimas 200 tentativas. “Enviado” indica aceitação pela API, sem confirmação de leitura.</p>${btn(state.settings.mode === "simulation" ? "Simular rotina" : "Executar rotina", "run", "", "primary")}</div><section class="card">${state.deliveries.length ? `<div class="table-wrap"><table><thead><tr><th>Cliente / Fatura</th><th>Lembrete</th><th>Data</th><th>Modo</th><th>Status</th><th></th></tr></thead><tbody>${state.deliveries.map((d) => `<tr><td><strong>${esc(d.client)}</strong><small>${esc(d.number)}</small></td><td>${esc(d.rule)}</td><td>${new Date(d.created).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}</td><td>${d.mode === "live" ? "Real" : "Simulação"}</td><td>${badge(d.status)}</td><td>${btn("Ver mensagem", "delivery", d.id)}</td></tr>`).join("")}</tbody></table></div>` : empty("Cada mensagem terá sua história", "Execute uma simulação para conferir os avisos elegíveis.", "run", "Simular rotina")}</section>`;
+    return `<div class="heading"><p class="muted">Últimas 200 tentativas. “Enviado” indica aceitação pela API, sem confirmação de leitura.</p>${btn(state.settings.mode === "simulation" ? "Simular rotina" : "Executar rotina", "run", "", "primary")}</div><section class="card">${state.deliveries.length ? `<div class="table-wrap"><table><thead><tr><th>Cliente / Fatura</th><th>Lembrete</th><th>Data</th><th>Modo</th><th>Status</th><th></th></tr></thead><tbody>${state.deliveries.map((d) => `<tr><td><strong>${esc(d.client)}</strong><small>${esc(d.number)}</small></td><td>${esc(d.rule)}</td><td>${new Date(d.created).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}<small>Programado: ${date(d.scheduledDate)} ${esc(d.scheduledSlot?.startsWith("legacy-") ? "histórico" : d.scheduledSlot)}</small></td><td>${d.mode === "live" ? "Real" : "Simulação"}</td><td>${badge(d.status)}</td><td>${btn("Ver mensagem", "delivery", d.id)}</td></tr>`).join("")}</tbody></table></div>` : empty("Cada mensagem terá sua história", "Execute uma simulação para conferir os avisos elegíveis.", "run", "Simular rotina")}</section>`;
   if (page === "settings") {
     const s = state.settings;
-    return `<form id="settings"><div class="settings-grid"><section class="card"><div class="card-head"><div class="connection"><span class="integrations-logo">◉</span><div><h2>WhatsApp · Uazapi</h2><span class="muted">Sua conexão com o cliente</span></div></div>${badge(s.tokenConfigured ? "paid" : "cancelled", s.tokenConfigured ? "Configurada" : "Pendente")}</div><div class="card-body"><div class="form-grid">${field("URL do servidor Uazapi", "uazapiUrl", s.uazapiUrl, "url", 'placeholder="https://sua-instancia.uazapi.com"')}${field("Token da instância", "uazapiToken", "", "password", `autocomplete="new-password" placeholder="${s.tokenConfigured ? "Salvo • deixe vazio para manter" : "Token da instância"}"`)}</div><p class="help">O token fica criptografado no servidor. Salve as alterações antes de testar a conexão.</p>${btn("Testar conexão", "connection")}</div></section><section class="card"><div class="card-head"><div class="connection"><span class="integrations-logo">∞</span><div><h2>InfinitePay</h2><span class="muted">Checkout com pagamento por Pix</span></div></div>${badge(s.handle && s.publicUrl ? "paid" : "cancelled", s.handle && s.publicUrl ? "Configurada" : "Pendente")}</div><div class="card-body"><div class="form-grid">${field("InfiniteTag (sem $)", "handle", s.handle, "text", 'placeholder="sua-tag"')}${field("URL pública do Zap Hub", "publicUrl", s.publicUrl, "url", 'placeholder="https://cobrancas.suaempresa.com.br"')}</div><p class="help">Habilite o Checkout Integrado na InfinitePay. O checkout oferece Pix e cartão. A URL pública HTTPS é necessária para confirmar os pagamentos.</p><p class="help">Webhook: <strong>${esc(s.publicUrl || "https://seu-dominio.com")}/webhooks/infinitepay</strong></p></div></section><section class="card wide"><div class="card-head"><div><h2>Automação de cobranças</h2><span class="muted">Defina quando seu hub deve agir</span></div></div><div class="card-body"><div class="form-grid"><label class="field">Modo de operação<select name="mode"><option value="simulation" ${s.mode === "simulation" ? "selected" : ""}>Simulação — sem mensagens ou links reais</option><option value="live" ${s.mode === "live" ? "selected" : ""}>Real — gerar links e enviar WhatsApp</option></select></label>${field("A partir de qual hora enviar? (Brasília)", "sendHour", s.sendHour, "number", 'min="0" max="19" required', "A janela encerra às 20h, todos os dias.")}<div>${check("auto", "Ativar rotina automática a cada minuto", s.auto)}</div></div><p class="help">Mantenha o servidor ligado. Com a rotina pausada, você ainda pode executar manualmente. Pagamentos confirmados interrompem os lembretes. Clientes e cobranças pausados não recebem avisos.</p><div class="inline-error" role="alert"></div><div class="form-actions"><button class="primary">Salvar configurações</button></div></div></section></div></form>`;
+    return `<form id="settings"><div class="settings-grid"><section class="card"><div class="card-head"><div class="connection"><span class="integrations-logo">◉</span><div><h2>WhatsApp · Uazapi</h2><span class="muted">Sua conexão com o cliente</span></div></div>${badge(s.tokenConfigured ? "paid" : "cancelled", s.tokenConfigured ? "Configurada" : "Pendente")}</div><div class="card-body"><div class="form-grid">${field("URL do servidor Uazapi", "uazapiUrl", s.uazapiUrl, "url", 'placeholder="https://sua-instancia.uazapi.com"')}${field("Token da instância", "uazapiToken", "", "password", `autocomplete="new-password" placeholder="${s.tokenConfigured ? "Salvo • deixe vazio para manter" : "Token da instância"}"`)}</div><p class="help">O token fica criptografado no servidor. Salve as alterações antes de testar a conexão.</p>${btn("Testar conexão", "connection")}</div></section><section class="card"><div class="card-head"><div class="connection"><span class="integrations-logo">∞</span><div><h2>InfinitePay</h2><span class="muted">Checkout com pagamento por Pix</span></div></div>${badge(s.handle && s.publicUrl ? "paid" : "cancelled", s.handle && s.publicUrl ? "Configurada" : "Pendente")}</div><div class="card-body"><div class="form-grid">${field("InfiniteTag (sem $)", "handle", s.handle, "text", 'placeholder="sua-tag"')}${field("URL pública do Zap Hub", "publicUrl", s.publicUrl, "url", 'placeholder="https://cobrancas.suaempresa.com.br"')}</div><p class="help">Habilite o Checkout Integrado na InfinitePay. O checkout oferece Pix e cartão. A URL pública HTTPS é necessária para confirmar os pagamentos.</p><p class="help">Webhook: <strong>${esc(s.publicUrl || "https://seu-dominio.com")}/webhooks/infinitepay</strong></p></div></section><section class="card wide"><div class="card-head"><div><h2>Automação de cobranças</h2><span class="muted">Defina quando seu hub deve agir</span></div></div><div class="card-body"><div class="form-grid"><label class="field">Modo de operação<select name="mode"><option value="simulation" ${s.mode === "simulation" ? "selected" : ""}>Simulação — sem mensagens ou links reais</option><option value="live" ${s.mode === "live" ? "selected" : ""}>Real — gerar links e enviar WhatsApp</option></select></label>${scheduleFields(s)}<div>${check("auto", "Ativar rotina automática a cada minuto", s.auto)}</div></div><p class="help">Mantenha o servidor ligado. Com a rotina pausada, você ainda pode executar manualmente. Pagamentos confirmados interrompem os lembretes. Clientes e cobranças pausados não recebem avisos.</p><div class="inline-error" role="alert"></div><div class="form-actions"><button class="primary">Salvar configurações</button></div></div></section></div></form>`;
   }
 }
 function modal(title, body) {
@@ -221,17 +247,29 @@ function editor(kind, id) {
   let value = state[kind].find((v) => v.id === id) || {},
     body = "";
   if (kind === "clients")
-    body = `${field("Nome do cliente", "name", value.name, "text", 'required maxlength="150"')}${field("Nome da empresa", "company", value.company, "text", 'required maxlength="150"')}${field("WhatsApp", "phone", value.phone || "55", "tel", "required", "55 + DDD + número")}${field("CPF", "cpf", value.cpf, "text", "required", "Informe um CPF válido, com ou sem pontuação.")}`;
+    body = `${field("Nome do cliente", "name", value.name, "text", 'required maxlength="150"')}${field("Nome da empresa", "company", value.company, "text", 'required maxlength="150"')}${field("WhatsApp", "phone", value.phone || "", "tel", "", "55 + DDD + número. Sem telefone, nenhum aviso será enviado.")}${field("CPF/CNPJ", "cpf", value.cpf, "text", "required", "Informe um CPF ou CNPJ válido, com ou sem pontuação.")}`;
   if (kind === "plans") {
-    if (!state.clients.length) {
+    if (!state.clients.filter(c => !c.deletedAt).length) {
       toast("Cadastre seu primeiro cliente antes da cobrança.");
       editor("clients");
       return;
     }
-    body = `<label class="field">Cliente<select name="clientId" required>${state.clients.map((c) => `<option value="${c.id}" ${value.clientId === c.id ? "selected" : ""}>${esc(c.name)} · ${esc(c.company)}</option>`).join("")}</select></label>${field("Nome da fatura", "name", value.name, "text", 'required placeholder="Ex.: Mensalidade do sistema"')}${field("Valor mensal (R$)", "amount", value.amount ? (value.amount / 100).toFixed(2) : "", "number", 'required min="0.01" max="1000000" step="0.01"')}${field("Dia do vencimento", "day", value.day || 10, "number", 'required min="1" max="31"', "Meses curtos usam o último dia disponível.")}${field("Início da cobrança", "start", value.start || state.today, "date", "required")}${field("Término da cobrança", "end", value.end || `${Number(state.today.slice(0, 4)) + 1}${state.today.slice(4)}`, "date", "required")}<div class="field full"><small>Referências mensais são criadas automaticamente (ex.: 01/2026, 02/2026). O início e o término limitam também o envio dos avisos. Faturas já geradas preservam valor, cliente e vencimento originais.</small></div>`;
+    body = `<label class="field">Cliente<select name="clientId" required>${state.clients.filter(c => !c.deletedAt).map((c) => `<option value="${c.id}" ${value.clientId === c.id ? "selected" : ""}>${esc(c.name)} · ${esc(c.company)}</option>`).join("")}</select></label>${field("Nome da fatura", "name", value.name, "text", 'required placeholder="Ex.: Mensalidade do sistema"')}${field("Valor mensal (R$)", "amount", value.amount ? (value.amount / 100).toFixed(2) : "", "number", 'required min="0.01" max="1000000" step="0.01"')}${field("Dia do vencimento", "day", value.day || 10, "number", 'required min="1" max="31"', "Meses curtos usam o último dia disponível.")}${field("Início da cobrança", "start", value.start || state.today, "date", "required")}${field("Término da cobrança", "end", value.end || `${Number(state.today.slice(0, 4)) + 1}${state.today.slice(4)}`, "date", "required")}<div class="field full"><small>Referências mensais são criadas automaticamente (ex.: 01/2026, 02/2026). O início e o término limitam também o envio dos avisos. Faturas já geradas preservam valor, cliente e vencimento originais.</small></div>`;
   }
   if (kind === "rules")
-    body = `${field("Nome do lembrete", "name", value.name, "text", "required")}${field("Dias em relação ao vencimento", "offset", value.offset ?? -5, "number", 'required min="-60" max="90"', "Negativo: antes. Zero: no dia. Positivo: após.")}<label class="field full">Mensagem<textarea name="template" required maxlength="4000">${esc(value.template || "Olá, {{nome_cliente}}! Sua fatura {{nome_fatura}}, de {{referencia}}, no valor de {{valor}}, vence em {{vencimento}}. Pague por Pix: {{link_pagamento}}")}</textarea><small>Clique em um campo abaixo para inserir na posição do cursor.</small></label><div class="field full"><div class="tokens">${state.fields.map((f) => btn("{{" + f + "}}", "token", f)).join("")}</div><h3>Prévia ilustrativa</h3><div class="preview" id="template-preview"></div></div>`;
+    body = `${field("Nome do lembrete", "name", value.name, "text", "required")}<label class="field">Etapa do aviso<select name="kind">${[
+      ["available", "Disponível — diário antes de vencer"],
+      ["due", "Vencimento — somente no dia"],
+      ["overdue", "Atraso — diário com prazo de bloqueio"],
+      ["custom", "Personalizado — em um dia específico"],
+    ]
+      .map(
+        ([v, l]) =>
+          `<option value="${v}" ${ruleType(value) === v ? "selected" : ""}>${l}</option>`,
+      )
+      .join(
+        "",
+      )}</select></label>${field("Dias em relação ao vencimento", "offset", value.offset ?? -5, "number", 'required min="-60" max="90"', "Disponível: -5 começa 5 dias antes. Vencimento: 0. Atraso: +5 define o bloqueio para 5 dias depois, com avisos diários desde o dia seguinte ao vencimento.")}<label class="field full">Mensagem<textarea name="template" required maxlength="4000">${esc(value.template || "Olá, {{nome_cliente}}! Sua fatura {{nome_fatura}}, de {{referencia}}, no valor de {{valor}}, vence em {{vencimento}}. Pague por Pix: {{link_pagamento}}")}</textarea><small>Clique em um campo abaixo para inserir na posição do cursor.</small></label><div class="field full"><div class="tokens">${state.fields.map((f) => btn("{{" + f + "}}", "token", f)).join("")}</div><h3>Prévia ilustrativa</h3><div class="preview" id="template-preview"></div></div>`;
   modal(
     id
       ? "Editar " +
@@ -259,6 +297,14 @@ function updatePreview() {
     inicio_cobranca: "01/01/2026",
     termino_cobranca: "31/12/2026",
     dias_atraso: "5",
+    data_bloqueio: date(
+      new Date(Date.parse(state.today + "T12:00:00Z") + 5 * 86400000)
+        .toISOString()
+        .slice(0, 10),
+    ),
+    dias_para_bloqueio: "5",
+    aviso_bloqueio:
+      "Para evitar o bloqueio previsto em 5 dias, regularize o pagamento.",
   };
   $("#template-preview").textContent = el.value.replace(
     /{{\s*(\w+)\s*}}/g,
@@ -287,6 +333,18 @@ document.addEventListener("click", async (e) => {
   e.preventDefault();
   const { action, id } = button.dataset;
   try {
+    if (action === "import-clients") {
+      modal("Importar clientes", `<form id="import-clients"><p>Selecione o arquivo JSON de clientes preparado a partir da planilha. Cadastros existentes serão preservados. Esta importação não cria faturas nem envia mensagens.</p><input type="file" name="file" accept=".json" required><div class="inline-error" role="alert"></div><div class="form-actions"><button class="primary">Importar</button></div></form>`);
+      return;
+    }
+    if (action === "delete-client") {
+      const count = state.invoices.filter(i => i.clientId === id && i.due > state.today && i.status !== "paid").length;
+      if (!confirm(`Excluir ${client(id)?.name}? Serão removidas ${count} faturas futuras não pagas e interrompidas as cobranças desse cliente. Pagamentos e faturas até hoje serão preservados no histórico.`)) return;
+      const result = await api("/clients/" + id, undefined, "DELETE");
+      await refresh();
+      toast(`Cliente excluído. ${result.removed} faturas futuras removidas.`);
+      return;
+    }
     if (action === "close") return dialog.close();
     if (action === "client" || action === "plan" || action === "rule")
       return editor(
@@ -385,6 +443,13 @@ document.addEventListener("submit", async (e) => {
   if (error) error.textContent = "";
   if (button) button.disabled = true;
   try {
+    if (form.id === "import-clients") {
+      const rows = JSON.parse(await fd.get("file").text());
+      const result = await api("/clients/import", { rows });
+      await refresh();
+      modal("Resultado da importação", `<p>${result.imported} clientes cadastrados; ${result.duplicates} duplicados ignorados; ${result.errors.length} pendências.</p>${result.errors.map(e => `<p>Linha ${e.row}: ${esc(e.name)} — ${esc(e.error)}</p>`).join("")}`);
+      return;
+    }
     if (form.id === "auth") {
       await api("/auth", data);
       await refresh();
@@ -418,7 +483,7 @@ document.addEventListener("submit", async (e) => {
       toast("Fatura atualizada.");
     }
     if (form.id === "settings") {
-      data.sendHour = Number(data.sendHour);
+      data.sendTimes = fd.getAll("sendTime");
       data.auto = fd.has("auto");
       if (
         data.mode === "live" &&
@@ -431,6 +496,11 @@ document.addEventListener("submit", async (e) => {
       await api("/settings", data, "PUT");
       await refresh();
       toast("Configurações salvas.");
+    }
+    if (form.id === "schedule") {
+      await api("/schedule", { sendTimes: fd.getAll("sendTime") }, "PUT");
+      await refresh();
+      toast("Quantidade e horários diários salvos.");
     }
   } catch (err) {
     if (error) error.textContent = err.message;
@@ -450,6 +520,30 @@ document.addEventListener("input", (e) => {
   }
 });
 document.addEventListener("change", (e) => {
+  if (e.target.id === "dailyCount") {
+    const previous = [...document.querySelectorAll('[name="sendTime"]')].map(
+      (el) => el.value,
+    );
+    const count = Number(e.target.value),
+      times = previous.slice(0, count);
+    const suggestions = [
+      "09:00",
+      "12:00",
+      "16:00",
+      "18:00",
+      "20:00",
+      "21:00",
+      "22:00",
+      "23:00",
+      "08:00",
+      "10:00",
+      "11:00",
+      "14:00",
+    ];
+    while (times.length < count)
+      times.push(suggestions.find((t) => !times.includes(t)));
+    $("#send-times").innerHTML = timeInputs(times);
+  }
   if (e.target.id === "filter") {
     filter = e.target.value;
     draw();

@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { addDays, render, today, hour } from "./domain.js";
+import {
+  addDays,
+  render,
+  today,
+  time,
+  ruleKind,
+  scheduledSlot,
+} from "./domain.js";
 export async function request(url, body, headers = {}) {
   const response = await fetch(url, {
     method: body ? "POST" : "GET",
@@ -46,6 +53,7 @@ export function createBilling(store, http = request) {
       if (url.protocol !== "https:")
         throw new Error("Link inválido retornado pelo gateway");
       const current = store.invoice(id);
+      if (!current) throw new Error("Fatura excluída durante a geração do link");
       current.paymentUrl = url.href;
       current.gatewayHandle = s.handle;
       store.saveInvoice(current);
@@ -105,22 +113,33 @@ export function createBilling(store, http = request) {
         i.status !== "pending" ||
         !p?.active ||
         !c?.active ||
+        !c.phone ||
         now < p.start ||
         now > p.end
       )
         continue;
-      // Recuperação após indisponibilidade: apenas o lembrete mais recente vencido.
-      const r = rules
-        .filter((r) => addDays(i.due, r.offset) <= now)
-        .sort((a, b) => b.offset - a.offset)[0];
-      if (r) result.push({ i, p, c, r, date: addDays(i.due, r.offset) });
+      // Uma mensagem por horário: lembrete personalizado tem prioridade no dia exato.
+      const custom = rules.find(
+        (r) => ruleKind(r) === "custom" && addDays(i.due, r.offset) === now,
+      );
+      const r =
+        custom ||
+        rules.find((r) => {
+          const kind = ruleKind(r);
+          if (kind === "available")
+            return now >= addDays(i.due, r.offset) && now < i.due;
+          if (kind === "due") return now === i.due;
+          if (kind === "overdue") return now > i.due;
+          return false;
+        });
+      if (r) result.push({ i, p, c, r, date: now });
     }
     return result;
   }
   async function run({
     force = false,
     now = today(),
-    currentHour = hour(),
+    currentTime = time(),
   } = {}) {
     if (running) return { busy: true };
     running = true;
@@ -129,8 +148,11 @@ export function createBilling(store, http = request) {
         s = store.settings();
       let sent = 0,
         failed = 0;
-      if (!force && (!s.auto || currentHour < s.sendHour || currentHour >= 20))
-        return { generated, sent, failed };
+      const times = s.sendTimes || ["09:00"];
+      const slot = scheduledSlot(times, currentTime, force);
+      if ((!force && !s.auto) || !slot) return { generated, sent, failed };
+      const blockDays =
+        store.all("rules").find((r) => ruleKind(r) === "overdue")?.offset ?? 5;
       for (const item of eligible(now)) {
         const { i, p, c, r } = item,
           id = randomUUID(),
@@ -138,12 +160,18 @@ export function createBilling(store, http = request) {
         if (
           store.db
             .prepare(
-              "SELECT id FROM deliveries WHERE invoice_id=? AND rule_id=? AND mode=?",
+              "SELECT id FROM deliveries WHERE invoice_id=? AND scheduled_date=? AND scheduled_slot=? AND mode=?",
             )
-            .get(i.id, r.id, mode)
+            .get(i.id, now, slot, mode)
         )
           continue;
-        let text = render(r.template, i, c, p, now),
+        const attempted = store.db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM deliveries WHERE invoice_id=? AND scheduled_date=? AND mode=?",
+          )
+          .get(i.id, now, mode).count;
+        if (attempted >= times.length) continue;
+        let text = render(r.template, i, c, p, now, blockDays),
           data = {
             created: new Date().toISOString(),
             number: i.number,
@@ -151,10 +179,21 @@ export function createBilling(store, http = request) {
             rule: r.name,
             text,
             error: "",
+            scheduledDate: now,
+            scheduledSlot: slot,
           };
         const claimed = store.db
-          .prepare("INSERT OR IGNORE INTO deliveries VALUES(?,?,?,?,?,?)")
-          .run(id, i.id, r.id, mode, "preparing", JSON.stringify(data));
+          .prepare("INSERT OR IGNORE INTO deliveries VALUES(?,?,?,?,?,?,?,?)")
+          .run(
+            id,
+            i.id,
+            r.id,
+            mode,
+            "preparing",
+            JSON.stringify(data),
+            now,
+            slot,
+          );
         if (!claimed.changes) continue;
         let status = "simulated";
         try {
@@ -164,14 +203,14 @@ export function createBilling(store, http = request) {
             await link(i.id);
             const fresh = store.invoice(i.id);
             if (
-              fresh.status !== "pending" ||
+              fresh?.status !== "pending" ||
               !store.get("plans", p.id)?.active ||
               !store.get("clients", c.id)?.active
             ) {
               status = "skipped";
               continue;
             }
-            text = render(r.template, fresh, c, p, now);
+            text = render(r.template, fresh, c, p, now, blockDays);
             data.text = text;
             store.db
               .prepare(
@@ -202,10 +241,11 @@ export function createBilling(store, http = request) {
             .run(status, JSON.stringify(data), id);
         }
       }
-      store.event(
-        "rotina",
-        `${s.mode === "live" ? "Envio" : "Simulação"}: ${sent} processados, ${failed} falhas, ${generated} faturas criadas`,
-      );
+      if (force || sent || failed || generated)
+        store.event(
+          "rotina",
+          `${s.mode === "live" ? "Envio" : "Simulação"}: ${sent} processados, ${failed} falhas, ${generated} faturas criadas`,
+        );
       return { generated, sent, failed };
     } finally {
       running = false;

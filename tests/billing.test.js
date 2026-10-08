@@ -211,11 +211,23 @@ test("callback é confirmado no gateway e rejeita valor divergente; pagamento é
 test("rotina respeita pausa e horário automático", async (t) => {
   const { s } = fixture(t);
   const b = createBilling(s);
-  assert.equal((await b.run({ now: "2026-10-05", currentHour: 10 })).sent, 0);
+  assert.equal(
+    (await b.run({ now: "2026-10-05", currentTime: "09:15" })).sent,
+    0,
+  );
   s.put("settings", "main", { ...s.settings(), auto: true });
-  assert.equal((await b.run({ now: "2026-10-05", currentHour: 8 })).sent, 0);
-  assert.equal((await b.run({ now: "2026-10-05", currentHour: 20 })).sent, 0);
-  assert.equal((await b.run({ now: "2026-10-05", currentHour: 10 })).sent, 1);
+  assert.equal(
+    (await b.run({ now: "2026-10-05", currentTime: "08:00" })).sent,
+    0,
+  );
+  assert.equal(
+    (await b.run({ now: "2026-10-05", currentTime: "20:00" })).sent,
+    0,
+  );
+  assert.equal(
+    (await b.run({ now: "2026-10-05", currentTime: "09:15" })).sent,
+    1,
+  );
 });
 test("API exige login, impede origem externa e não expõe token", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "zap-hub-api-"));
@@ -255,4 +267,28 @@ test("API exige login, impede origem externa e não expõe token", async (t) => 
   assert.equal(data.settings.tokenConfigured, true);
   assert.equal(data.settings.uazapiToken, undefined);
   assert.ok(!JSON.stringify(data).includes("segredo-nunca-exposto"));
+});
+
+test("exclusão preserva histórico e pagamentos, remove futuras e impede regeneração", (t) => {
+  const {s,c,p} = fixture(t);
+  s.generate("2026-10-10");
+  const paid = s.invoices().find(i => i.reference === "2026-12");
+  paid.status = "paid"; s.saveInvoice(paid);
+  assert.deepEqual(s.deleteClient(c.id,"2026-10-10"), {removed:1});
+  assert.equal(s.invoices().length,2);
+  assert.ok(s.invoice(paid.id));
+  assert.equal(s.get("plans",p.id).active,false);
+  assert.ok(s.get("clients",c.id).deletedAt);
+  assert.equal(s.generate("2026-12-01"),0);
+  assert.equal(createBilling(s).eligible("2026-10-10").length,0);
+  assert.equal(s.deleteClient(c.id,"2026-10-10"),null);
+});
+
+test("cliente sem WhatsApp não recebe lembretes", (t) => {
+  const {s,c} = fixture(t);
+  s.put("clients",c.id,{...c,phone:""});
+  s.generate("2026-10-10");
+  assert.equal(createBilling(s).eligible("2026-10-10").length,0);
+  assert.equal(clientSchema.safeParse({...c,phone:"",cpf:"11.222.333/0001-81"}).success,true);
+  assert.equal(clientSchema.safeParse({...c,cpf:"11.222.333/0001-82"}).success,false);
 });
