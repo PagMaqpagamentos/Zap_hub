@@ -1,4 +1,5 @@
 import express from "express";
+import { normalizeBillingImage } from "./billing-image.js";
 import { z } from "zod";
 import {
   randomBytes,
@@ -263,7 +264,7 @@ export function createApp(
       }
     }, "Use uma URL HTTPS sem caminho, usuário ou parâmetros")
     .transform((s) => s.replace(/\/$/, ""));
-  app.put("/api/settings", (req, res) => {
+  app.put("/api/settings", async (req, res) => {
     const data = z
       .object({
         mode: z.enum(["simulation", "live"]),
@@ -289,6 +290,7 @@ export function createApp(
         }, "Envie uma imagem PNG ou JPEG de até 2 MB").optional(),
       })
       .parse(req.body);
+    if (data.billingImage !== undefined) data.billingImage = await normalizeBillingImage(data.billingImage);
     const current = store.settings();
     const updated = {
       ...current,

@@ -844,3 +844,7 @@ dialog::backdrop {
 .plans-table small { line-height: 1.5; }
 
 [hidden] { display: none !important; }
+
+.billing-image-preview { display:block; width:100%; max-width:360px; height:auto; max-height:240px; object-fit:contain; margin:12px 0; border-radius:8px; }
+.settings-grid > *, .settings-grid .card-body, .settings-grid .field { min-width:0; }
+.settings-grid input[type=file] { width:100%; max-width:100%; box-sizing:border-box; }
