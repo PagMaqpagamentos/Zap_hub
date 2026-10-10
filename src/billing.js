@@ -282,6 +282,39 @@ export function createBilling(store, http = request) {
       running = false;
     }
   }
+  async function sendInvoice(id, requestId, revision) {
+    const previous = store.get("manualSends", requestId);
+    if (previous) {
+      if (previous.invoiceId !== id) throw new Error("Identificador de envio já utilizado");
+      return previous;
+    }
+    const invoice = store.invoice(id), settings = store.settings();
+    const customer = invoice && store.get("clients", invoice.clientId);
+    const recurring = invoice && store.get("plans", invoice.planId);
+    if (!invoice || invoice.status !== "pending" || !balance(invoice)) throw new Error("Fatura não está em aberto");
+    if ((invoice.revision || "") !== revision) throw new Error("A fatura mudou. Atualize a tela antes de enviar.");
+    if (!customer?.active || customer.deletedAt || recurring?.deletedAt) throw new Error("Cliente ou cobrança indisponível");
+    if (!customer.phone) throw new Error("Cadastre o WhatsApp do cliente antes de enviar");
+    if (!settings.uazapiUrl || !settings.uazapiToken) throw new Error("Configure a Uazapi antes de enviar");
+    const record = { id: requestId, invoiceId:id, created:new Date().toISOString(), status:"preparing", phone:customer.phone };
+    store.put("manualSends", requestId, record);
+    try {
+      const checkoutUrl = await link(id), fresh = store.invoice(id);
+      if (fresh?.status !== "pending" || balance(fresh) !== balance(invoice) || !store.get("clients", customer.id)?.active)
+        throw new Error("A fatura ou o cliente mudou antes do envio. Atualize a tela.");
+      const url = paymentLink(checkoutUrl);
+      record.text = [`Olá, ${customer.name}!`, "", "Sua fatura está disponível para pagamento.", "", `Empresa: ${customer.company}`, `Fatura: ${fresh.name}`, `Número: ${fresh.number}`, `Referência: ${fresh.reference.split("-").reverse().join("/")}`, `Vencimento: ${brDate(fresh.due)}`, `Valor a pagar: ${money(balance(fresh))}`, "", "Pagar via Pix:", url].join("\n");
+      record.status = "uncertain";
+      store.put("manualSends", requestId, record);
+      const result = await sendCharge(settings, customer.phone, record.text, url, checkoutUrl);
+      if (result.error || result.success === false) throw new Error("Uazapi não confirmou o envio. Confira antes de repetir.");
+      record.status = "sent";
+      record.providerId = result.messageid || result.id || null;
+    } catch (error) { record.error = error.message; if (record.status === "preparing") record.status = "failed"; }
+    store.put("manualSends", requestId, record);
+    store.event("envio manual", `${invoice.number}: ${record.status}${record.error ? " — " + record.error : ""}`);
+    return record;
+  }
   async function integrationTest(input) {
     const previous = store.get("integrationTests", input.id);
     if (previous) return previous;
@@ -349,5 +382,5 @@ export function createBilling(store, http = request) {
     store.event("teste", `Teste ${test.kind}: ${test.status}; WhatsApp: ${test.whatsappStatus}`);
     return store.get("integrationTests", test.id);
   }
-  return { link, confirm, eligible, run, integrationTest };
+  return { link, confirm, eligible, run, integrationTest, sendInvoice };
 }

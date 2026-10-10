@@ -345,6 +345,10 @@ export function createApp(
         result.instance?.status === "connected",
     });
   });
+  app.post("/api/invoices/:id/send-whatsapp", async (req, res) => {
+    const input = z.object({requestId:z.string().uuid(),revision:z.string().default("")}).parse(req.body);
+    res.json(await billing.sendInvoice(req.params.id, input.requestId, input.revision));
+  });
   app.post("/api/integration-tests", async (req, res) => {
     const input = z.object({
       id: z.string().uuid(), kind: z.enum(["standalone", "invoice"]),

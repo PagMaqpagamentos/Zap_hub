@@ -422,3 +422,18 @@ test("telefone aceita Brasil e exterior; prefixo padrão sozinho não cadastra n
  assert.equal(clientSchema.parse({...base,phone:"+55 "}).phone,"");
  assert.equal(clientSchema.safeParse({...base,phone:"+55 37 123"}).success,false);
 });
+
+test("envio manual usa cliente e saldo da fatura sem duplicar requisição", async t=>{
+ const {s,c}=fixture(t);s.generate("2026-10-01");
+ s.put("settings","main",{...s.settings(),handle:"loja",publicUrl:"https://hub.example.com",uazapiUrl:"https://wa.example.com",uazapiToken:s.seal("secret")});
+ const invoice=s.invoices()[0];s.saveInvoice({...invoice,paidAmount:1000});
+ const current=s.invoice(invoice.id), calls=[];
+ const b=createBilling(s,async(url,body)=>{calls.push({url,body});return url.endsWith("/links")?{url:"https://checkout.infinitepay.io/test"}:{id:"sent"};});
+ const requestId=randomUUID();
+ const result=await b.sendInvoice(current.id,requestId,current.revision||"");
+ assert.equal(result.status,"sent");assert.equal(calls[0].body.items[0].price,current.amount-1000);assert.equal(calls[1].body.number,c.phone);
+ await b.sendInvoice(current.id,requestId,current.revision||"");assert.equal(calls.length,2);
+ await assert.rejects(b.sendInvoice(current.id,randomUUID(),"stale"),/mudou/);
+ s.saveInvoice({...s.invoice(current.id),status:"paid"});
+ await assert.rejects(b.sendInvoice(current.id,randomUUID(),""),/aberto/);
+});
