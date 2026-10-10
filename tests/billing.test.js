@@ -401,14 +401,17 @@ test("excluir cobrança remove futuras sem recebimentos e preserva histórico",t
    const calls=[];
    const b=createBilling(s, async (url,body)=>{calls.push({url,body}); return url.endsWith("/links") ? {url:"https://checkout.infinitepay.io/example"} : {id:"sent"};});
    await b.integrationTest({id:randomUUID(),kind:"standalone",amount:100,phone:"5511999999999",sendWhatsapp:true});
-   assert.equal(calls[1].body.file,image);
-   assert.equal(calls[1].body.mimetype,"image");
+   assert.ok(calls[1].url.endsWith("/send/media"));
+   assert.equal(calls[1].body.file,image.split(",")[1]);
+   assert.equal(calls[1].body.mimetype,"image/png");
+   assert.ok(calls[2].url.endsWith("/send/menu"));
+   assert.equal(calls[2].body.file,undefined);
    assert.ok(!calls[1].body.text.includes("https://"));
    s.put("settings","main",{...s.settings(),paymentPresentation:"link"});
    await b.integrationTest({id:randomUUID(),kind:"standalone",amount:100,phone:"5511999999999",sendWhatsapp:true});
-   assert.ok(calls[3].url.endsWith("/send/text"));
-   assert.equal(calls[3].body.linkPreview,false);
-   assert.ok(calls[3].body.text.includes("https://hub.example.com/p/"));
+   assert.ok(calls[4].url.endsWith("/send/text"));
+   assert.equal(calls[4].body.linkPreview,false);
+   assert.ok(calls[4].body.text.includes("https://hub.example.com/p/"));
  });
 
 test("telefone aceita Brasil e exterior; prefixo padrão sozinho não cadastra número", () => {

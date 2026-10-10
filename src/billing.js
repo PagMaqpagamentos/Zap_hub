@@ -36,8 +36,18 @@ export function createBilling(store, http = request) {
   async function sendCharge(settings, number, text, url, checkoutUrl) {
     const button = settings.paymentPresentation !== "link";
     const body = button
-      ? { number, type: "button", text: text.replaceAll("Pague por Pix neste link: ", "").replaceAll("Pagamento por Pix: ", "").replaceAll("Pagar via Pix:\n", "").replaceAll(url, "Toque no botão abaixo e escolha Pix para pagar."), choices: ["💳 Pagar fatura|" + checkoutUrl], ...(settings.billingImage ? { file: settings.billingImage, mimetype: "image" } : {}) }
+      ? { number, type: "button", text: text.replaceAll("Pague por Pix neste link: ", "").replaceAll("Pagamento por Pix: ", "").replaceAll("Pagar via Pix:\n", "").replaceAll(url, "Toque no botão abaixo e escolha Pix para pagar."), choices: ["💳 Pagar fatura|" + checkoutUrl],  }
       : { number, text, linkPreview: false };
+    if (button && settings.billingImage) {
+      const media = await http(settings.uazapiUrl + "/send/media", {
+        number, type: "image", file: settings.billingImage.split(",")[1],
+        mimetype: settings.billingImage.startsWith("data:image/png") ? "image/png" : "image/jpeg",
+        text: body.text,
+      }, { token: store.unseal(settings.uazapiToken) });
+      if (media.error || media.success === false || media.status === "Failed")
+        throw new Error("Uazapi não confirmou a imagem. Confira o envio antes de repetir.");
+      body.text = "Pague sua fatura com segurança pela InfinitePay. Escolha Pix na página de pagamento.";
+    }
     return http(settings.uazapiUrl + (button ? "/send/menu" : "/send/text"), body, { token: store.unseal(settings.uazapiToken) });
   }
   async function link(id) {
