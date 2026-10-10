@@ -114,6 +114,7 @@ async function api(url, body, method = body ? "POST" : "GET") {
 }
 async function refresh() {
   state = await api("/state");
+  state.hubData = await api("/hubs");
   draw();
 }
 const brand = `<div class="brand"><span class="logo">ϟ</span><span>zap<span>hub</span><small>GESTÃO DE COBRANÇAS</small></span></div>`;
@@ -132,6 +133,9 @@ const headings = {
   invoices: ["Faturas", "Cada recebimento, do vencimento à confirmação."],
   rules: ["Mensagens e lembretes", "A mensagem certa, no momento certo."],
   history: ["Histórico de envios", "Acompanhe cada tentativa de comunicação."],
+  hubs: ["Hubs", "Atalhos gerenciados, pareamento e comunicação com os computadores."],
+  trust: ["Liberações em confiança", "Histórico e limites compartilhados por cobrança."],
+  counter: ["Contrassenha", "Liberação temporária para computadores sem internet."],
   settings: ["Integrações", "Conecte as ferramentas que movem seu negócio."],
 };
 function draw() {
@@ -142,6 +146,9 @@ function draw() {
     ["invoices", "▤", "Faturas"],
     ["rules", "☷", "Lembretes"],
     ["history", "◷", "Histórico"],
+    ["hubs", "▣", "Hubs"],
+    ["trust", "◷", "Confiança"],
+    ["counter", "⚿", "Contrassenha"],
     ["settings", "⚙", "Integrações"],
   ];
   const [title, subtitle] = headings[page];
@@ -160,7 +167,16 @@ function invoiceTable(items) {
         "Criar cobrança",
       );
 }
+function hubContent() {
+  const hubs=state.hubData?.hubs || [], events=state.hubData?.events || [];
+  if(page === "counter") return `<section class="card"><form id="hub-counter" class="card-body"><p>Peça ao cliente o código exibido no Hub. A contrassenha libera apenas aquele computador pelo período escolhido, mesmo sem internet. Revogações online só chegam ao computador quando ele reconecta.</p>${field("Código exibido no computador","challenge","","text","required maxlength=300")}${field("Horas de liberação","hours",24,"number","required min=1 max=24")}<div class="inline-error" role="alert"></div><button class="primary">Gerar contrassenha</button></form></section>`;
+  if(page === "trust") return `<section class="card"><div class="card-body"><h2>Uso por cobrança</h2><p>O contador é compartilhado pelos computadores da mesma cobrança e não é zerado ao pagar. Cada solicitação concede 24 horas.</p>${hubs.map(h=>`<p><strong>${esc(h.name)}</strong> · ${esc(plan(h.planId)?.name)} · ${h.trust.count || 0} uso(s) · limite ${h.trustLimit} · até ${h.trust.until ? new Date(h.trust.until).toLocaleString("pt-BR") : "—"}</p>`).join("")}</div></section>${hubEvents(events.filter(e=>["confiança","contrassenha"].includes(e.action)))}`;
+  return `<div class="notice"><div><strong>Controle pelo atalho</strong><p>O Hub consulta a cobrança antes de iniciar o programa. A abertura direta do EXE continua possível. Online significa contato nos últimos 3 minutos. Mudanças chegam na próxima consulta; sem internet, vale a autorização temporária assinada.</p></div></div><div class="actions">${btn("Novo Hub", "hub-new")}<a class="primary" href="/downloads/Paratech_Infinite.exe" download>Baixar Paratech_Infinite.exe</a></div><p class="help">Windows 10/11 · 64 bits · versão para teste piloto, ainda sem assinatura digital. <a href="/downloads/LEIA-ME.md" download>Instruções de instalação</a></p><section class="card"><div class="table-wrap"><table><thead><tr><th>Hub / Cliente</th><th>Cobrança</th><th>Comunicação</th><th>Situação</th><th></th></tr></thead><tbody>${hubs.map(h=>`<tr><td><strong>${esc(h.name)}</strong><small>${esc(client(h.clientId)?.name)}</small><small>${esc(h.machine)}</small></td><td>${esc(plan(h.planId)?.name)}</td><td>${badge(h.online?"paid":"gray",h.online?"Online":h.paired?"Offline":"Aguardando pareamento")}<small>${h.lastSeen?new Date(h.lastSeen).toLocaleString("pt-BR"):"Sem contato"}</small></td><td>${esc({ok:"Em dia",available:"Fatura disponível",overdue:"Em atraso",blocked:"Atalho bloqueado",released:"Liberado"}[h.status])}${h.revoked?" · Revogado":""}</td><td>${btn("Configurar","hub-edit",h.id)} ${!h.revoked?btn("Novo código","hub-pair",h.id)+btn("Revogar","hub-revoke",h.id,"danger"):""}</td></tr>`).join("")}</tbody></table></div></section>${hubEvents(events)}`;
+}
+function hubEvents(events) { return `<section class="card"><div class="card-body"><h2>Comunicação e ações recentes</h2>${events.length ? events.map(e=>`<p>${new Date(e.created).toLocaleString("pt-BR")} · ${esc(state.hubData.hubs.find(h=>h.id===e.hubId)?.name)} · <strong>${esc(e.action)}</strong> ${esc(e.detail)}</p>`).join("") : "Nenhum evento."}</div></section>`; }
+function showHubCode(title, code) { modal(title, `<p>${title.startsWith("Contrassenha") ? "Envie este código ao cliente. Ele só libera o computador do desafio informado, pelo prazo escolhido." : "Copie o código abaixo. O pareamento expira em 15 minutos e só pode ser usado uma vez."}</p><label class="field">Código<textarea readonly rows="6">${esc(code)}</textarea></label>`); }
 function content() {
+  if (["hubs","trust","counter"].includes(page)) return hubContent();
   if (page === "dashboard") {
     const invoices = state.invoices,
       month = state.today.slice(0, 7),
@@ -356,6 +372,12 @@ document.addEventListener("click", async (e) => {
       modal("Enviar cobrança pelo WhatsApp", `<form id="send-invoice-form" data-invoice-id="${invoice.id}" data-request-id="${crypto.randomUUID()}" data-revision="${esc(invoice.revision || "")}"><p><strong>${esc(customer.name)}</strong> · +${esc(customer.phone)}</p><p>${esc(invoice.name)} · ${esc(invoice.number)}<br>Referência: ${ref(invoice.reference)}<br>Vencimento: ${date(invoice.due)}<br>Saldo: <strong>${brl(balance(invoice))}</strong></p><p class="help">Este envio é real, mesmo no modo simulação. Será usada a imagem e a apresentação salvas em Integrações. A rotina automática não será alterada.</p><div class="inline-error" role="alert"></div><button class="primary">Enviar agora</button></form>`);
       return;
     }
+    if (action === "hub-new" || action === "hub-edit") {
+      const h=state.hubData.hubs.find(h=>h.id===id);
+      modal(h?"Configurar Hub":"Novo Hub",`<form id="hub-form" data-id="${h?.id || ""}">${!h ? field("Nome do computador / Hub","name","","text","required")+`<label class="field">Cobrança<select name="planId" required>${state.plans.filter(p=>!p.deletedAt).map(p=>`<option value="${p.id}">${esc(client(p.clientId)?.name)} · ${esc(p.name)}</option>`).join("")}</select></label>` : `<label class="field">Controle<select name="policy">${[["auto","Automático pela fatura"],["blocked","Bloquear atalho"],["released","Liberar até nova alteração"]].map(([v,l])=>`<option value="${v}" ${h.policy===v?"selected":""}>${l}</option>`).join("")}</select></label>`}${field("Limite de liberações em confiança","trustLimit",h?.trustLimit ?? 1,"number","required min=0 max=20")}${field("Horas de validade sem internet","offlineHours",h?.offlineHours ?? 24,"number","required min=1 max=72")}<p class="help">Limites de confiança são contabilizados por cobrança. Sem contato com o servidor, alterações não são imediatas.</p><div class="inline-error" role="alert"></div><button class="primary">Salvar</button></form>`);return;
+    }
+    if(action === "hub-pair") {const result=await api("/hubs/"+id+"/pair-code",{}); showHubCode("Pareamento",result.code);return;}
+    if(action === "hub-revoke") {if(!confirm("Revogar este Hub? O atalho será bloqueado na próxima consulta. Uma nova instalação exigirá outro Hub."))return;await api("/hubs/"+id+"/revoke",{});await refresh();return;}
     if (action === "refresh-tests") { await refresh(); return; }
     if (action === "invoice-edit") return invoiceEditor(id);
     if (action === "plan-invoices") return modal("Faturas · " + plan(id).name, invoiceTable(state.invoices.filter(i=>i.planId===id).sort((a,b)=>a.due.localeCompare(b.due))));
@@ -498,6 +520,12 @@ document.addEventListener("submit", async (e) => {
       if (result.status !== "sent") throw new Error(result.error || "Envio em processamento ou incerto. Confira o WhatsApp antes de repetir.");
       dialog.close(); await refresh(); toast("Envio aceito pela Uazapi."); return;
     }
+    if(form.id === "hub-form") {
+      const payload={...data,trustLimit:Number(data.trustLimit),offlineHours:Number(data.offlineHours)};
+      const result=await api("/hubs"+(form.dataset.id?"/"+form.dataset.id:""),payload,form.dataset.id?"PUT":"POST");
+      dialog.close();await refresh();if(result.code)showHubCode("Código de pareamento",result.code);else toast("Hub atualizado.");return;
+    }
+    if(form.id === "hub-counter") {const result=await api("/hubs/counter-code",{challenge:data.challenge,hours:Number(data.hours)});showHubCode("Contrassenha — envie ao cliente",result.code);return;}
     if (form.id === "auth") {
       await api("/auth", data);
       await refresh();

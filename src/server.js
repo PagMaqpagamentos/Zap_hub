@@ -1,4 +1,5 @@
 import express from "express";
+import { createHubs } from "./hubs.js";
 import { normalizeBillingImage } from "./billing-image.js";
 import { z } from "zod";
 import {
@@ -36,6 +37,7 @@ export function createApp(
     billing = createBilling(store, http),
     sessions = new Map(),
     attempts = new Map();
+  const hubs = createHubs(store, billing);
   app.disable("x-powered-by");
   app.get("/p/:id", (req, res) => {
     res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex, nofollow" });
@@ -73,6 +75,7 @@ export function createApp(
     }
     next();
   });
+  app.use("/device-api", hubs.device);
   const token = (req) =>
     (req.headers.cookie || "")
       .split(";")
@@ -164,6 +167,7 @@ export function createApp(
       ? next()
       : res.status(401).json({ error: "Entre para continuar" }),
   );
+  app.use("/api/hubs", hubs.admin);
   app.post("/api/logout", (req, res) => {
     sessions.delete(token(req));
     res.set(
