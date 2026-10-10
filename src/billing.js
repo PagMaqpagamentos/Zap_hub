@@ -33,10 +33,10 @@ export function createBilling(store, http = request) {
     if (!existing) store.put("paymentLinks", id, { id, url });
     return store.settings().publicUrl + "/p/" + id;
   }
-  async function sendCharge(settings, number, text, url) {
+  async function sendCharge(settings, number, text, url, checkoutUrl) {
     const button = settings.paymentPresentation !== "link";
     const body = button
-      ? { number, type: "button", text: text.replaceAll("Pague por Pix neste link: ", "").replaceAll("Pagamento por Pix: ", "").replaceAll("Pagar via Pix:\n", "").replaceAll(url, "Toque no botão abaixo e escolha Pix para pagar."), choices: ["💳 Pagar fatura|" + url], ...(settings.billingImage ? { file: settings.billingImage, mimetype: "image" } : {}) }
+      ? { number, type: "button", text: text.replaceAll("Pague por Pix neste link: ", "").replaceAll("Pagamento por Pix: ", "").replaceAll("Pagar via Pix:\n", "").replaceAll(url, "Toque no botão abaixo e escolha Pix para pagar."), choices: ["💳 Pagar fatura|" + checkoutUrl], ...(settings.billingImage ? { file: settings.billingImage, mimetype: "image" } : {}) }
       : { number, text, linkPreview: false };
     return http(settings.uazapiUrl + (button ? "/send/menu" : "/send/text"), body, { token: store.unseal(settings.uazapiToken) });
   }
@@ -243,7 +243,7 @@ export function createBilling(store, http = request) {
               )
               .run(JSON.stringify(data), id);
             status = "uncertain";
-            const result = await sendCharge(s, c.phone, text, paymentLink(fresh.paymentUrl));
+            const result = await sendCharge(s, c.phone, text, paymentLink(fresh.paymentUrl), fresh.paymentUrl);
             if (result.error || result.success === false)
               throw new Error(
                 "Uazapi não confirmou o envio; confira no provedor",
@@ -324,7 +324,7 @@ export function createBilling(store, http = request) {
           "No checkout, escolha Pix para visualizar o QR Code e o Copia e Cola.",
         ].join("\n");
         saveTest();
-        const result = await sendCharge(s, test.phone, test.message, test.messageLink);
+        const result = await sendCharge(s, test.phone, test.message, test.messageLink, test.paymentUrl);
         if (result.error || result.success === false) throw new Error("Uazapi não confirmou o envio. Confira no provedor antes de repetir.");
         test.whatsappStatus = "sent";
         test.providerId = result.messageid || result.id || null;

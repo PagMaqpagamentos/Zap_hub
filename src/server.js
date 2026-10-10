@@ -581,7 +581,7 @@ export function createApp(
       checking = false;
     }
   }
-  app.use(express.static(resolve(root, "public")));
+  app.use(express.static(resolve(root, "public"), { maxAge: 0, setHeaders: res => res.setHeader("Cache-Control", "no-store") }));
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
     const message =

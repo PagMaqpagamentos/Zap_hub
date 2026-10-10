@@ -157,7 +157,7 @@ test("modo real gera link em centavos e envia uma só vez mesmo com chamadas con
   assert.equal(calls.length, 2);
   assert.equal(calls[0].body.items[0].price, 14990);
   assert.equal(calls[1].headers.token, "segredo");
-  assert.match(calls[1].body.choices[0], /https:\/\/hub\.example\.com\/p\/[a-f0-9]{32}/);
+  assert.equal(calls[1].body.choices[0], "💳 Pagar fatura|https://checkout.infinitepay.com.br/exemplo");
   assert.equal(s.deliveries()[0].status, "sent");
 });
 test("resposta incerta da Uazapi não provoca reenvio automático", async (t) => {
@@ -361,7 +361,7 @@ test("teste separado envia WhatsApp real uma vez em simulação e não altera fa
   const before=JSON.stringify(s.invoices());
   const result=await b.integrationTest(input);await b.integrationTest(input);
   assert.equal(result.whatsappStatus,"sent");assert.equal(calls.length,2);assert.equal(calls[0].body.items[0].price,100);
-  assert.equal(calls[1].url.endsWith("/send/menu"),true); assert.equal(calls[1].body.type,"button");assert.ok(calls[1].body.text.includes("Referência:"));assert.equal(calls[1].body.number,input.phone);assert.ok(!calls[1].body.text.includes(result.messageLink)); assert.equal(calls[1].body.choices[0], "💳 Pagar fatura|" + result.messageLink);
+  assert.equal(calls[1].url.endsWith("/send/menu"),true); assert.equal(calls[1].body.type,"button");assert.ok(calls[1].body.text.includes("Referência:"));assert.equal(calls[1].body.number,input.phone);assert.ok(!calls[1].body.text.includes(result.messageLink)); assert.equal(calls[1].body.choices[0], "💳 Pagar fatura|" + result.paymentUrl);
   await b.confirm({order_nsu:result.orderId,transaction_nsu:"teste",slug:"s"});await b.confirm({order_nsu:result.orderId,transaction_nsu:"teste",slug:"s"});
   assert.equal(s.get("integrationTests",input.id).status,"paid");assert.equal(s.all("testPayments").length,1);
   assert.equal(JSON.stringify(s.invoices()),before);assert.equal(s.all("payments").length,0);assert.equal(s.settings().mode,"simulation");
