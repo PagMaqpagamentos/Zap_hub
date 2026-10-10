@@ -92,15 +92,22 @@ const date = z
     "Data inválida",
   );
 const text = z.string().trim().min(1).max(150);
+export const normalizePhone = value => {
+  const digits = value.replace(/\D/g, "");
+  return digits === "55" ? "" : digits;
+};
+export const validPhone = value => value.startsWith("55")
+  ? /^55\d{10,11}$/.test(value)
+  : /^[1-9]\d{7,14}$/.test(value);
 export const clientSchema = z.object({
   name: text,
   company: text,
   phone: z
     .string()
-    .transform((s) => s.replace(/\D/g, ""))
+    .transform(normalizePhone)
     .refine(
-      (s) => s === "" || /^55\d{10,11}$/.test(s),
-      "Use WhatsApp com 55 + DDD + número",
+      (s) => s === "" || validPhone(s),
+      "Informe código do país + DDD e número; Brasil: +55",
     ),
   cpf: z
     .string()

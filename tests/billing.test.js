@@ -410,3 +410,12 @@ test("excluir cobrança remove futuras sem recebimentos e preserva histórico",t
    assert.equal(calls[3].body.linkPreview,false);
    assert.ok(calls[3].body.text.includes("https://hub.example.com/p/"));
  });
+
+test("telefone aceita Brasil e exterior; prefixo padrão sozinho não cadastra número", () => {
+ const base={name:"Teste",company:"Empresa",cpf:"52998224725"};
+ assert.equal(clientSchema.parse({...base,phone:"+55 (37) 92000-7857"}).phone,"5537920007857");
+ assert.equal(clientSchema.parse({...base,phone:"+351 912 345 678"}).phone,"351912345678");
+ assert.equal(clientSchema.parse({...base,phone:"+1 202 555 0123"}).phone,"12025550123");
+ assert.equal(clientSchema.parse({...base,phone:"+55 "}).phone,"");
+ assert.equal(clientSchema.safeParse({...base,phone:"+55 37 123"}).success,false);
+});

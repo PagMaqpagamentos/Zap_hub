@@ -14,6 +14,8 @@ import { createStore } from "./store.js";
 import { createBilling, request } from "./billing.js";
 import {
   clientSchema,
+  normalizePhone,
+  validPhone,
   planSchema,
   ruleSchema,
   FIELDS,
@@ -350,9 +352,9 @@ export function createApp(
       amount: z.number().int().min(1).max(100000000).default(100),
       invoiceId: z.string().uuid().optional(),
       sendWhatsapp: z.boolean().default(false),
-      phone: z.string().transform(s => s.replace(/\D/g, "")).default(""),
+      phone: z.string().transform(normalizePhone).default(""),
     }).refine(v => v.kind !== "invoice" || !!v.invoiceId, "Selecione uma fatura")
-      .refine(v => !v.sendWhatsapp || /^55\d{10,11}$/.test(v.phone), "Informe WhatsApp com 55 + DDD + número").parse(req.body);
+      .refine(v => !v.sendWhatsapp || validPhone(v.phone), "Informe WhatsApp com código do país, DDD e número").parse(req.body);
     res.json(await billing.integrationTest(input));
   });
   app.post("/api/generate", (req, res) =>
