@@ -9,10 +9,10 @@ for (const [width,height] of [[3000,1500],[1000,3000],[120,80]]) {
     const output = Buffer.from(result.split(",")[1],"base64");
     const meta = await sharp(output).metadata();
     assert.equal(meta.format,"jpeg");
-    assert.ok(meta.width <= 1280 && meta.height <= 1280);
+    assert.ok(meta.width <= 640 && meta.height <= 640);
     assert.ok(meta.width <= width && meta.height <= height);
     assert.ok(Math.abs(meta.width/meta.height-width/height) < 0.01);
-    assert.ok(output.length <= 500*1024);
+    assert.ok(output.length <= 80*1024);
   });
 }
 test("rejeita imagem corrompida e permite remover imagem", async () => {

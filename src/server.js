@@ -292,7 +292,7 @@ export function createApp(
         }, "Envie uma imagem PNG ou JPEG de até 2 MB").optional(),
       })
       .parse(req.body);
-    if (data.billingImage !== undefined) data.billingImage = await normalizeBillingImage(data.billingImage);
+    if (data.billingImage !== undefined || store.settings().billingImage) data.billingImage = await normalizeBillingImage(data.billingImage ?? store.settings().billingImage);
     const current = store.settings();
     const updated = {
       ...current,

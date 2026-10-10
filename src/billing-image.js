@@ -6,11 +6,11 @@ export async function normalizeBillingImage(value) {
     const pipeline = sharp(source, { limitInputPixels: 40000000, failOn: "warning" });
     const meta = await pipeline.metadata();
     if (!["png", "jpeg"].includes(meta.format) || (meta.pages || 1) > 1) throw new Error();
-    let width = 1280;
+    let width = 640;
     for (let attempt = 0; attempt < 5; attempt++) {
-      const output = await pipeline.clone().rotate().resize({ width, height: width, fit: "inside", withoutEnlargement: true })
-        .flatten({ background: "#ffffff" }).jpeg({ quality: 80, mozjpeg: true }).toBuffer();
-      if (output.length <= 500 * 1024) return "data:image/jpeg;base64," + output.toString("base64");
+      const output = await pipeline.clone().rotate().trim({ background: "#ffffff", threshold: 5 }).resize({ width, height: width, fit: "inside", withoutEnlargement: true })
+        .flatten({ background: "#ffffff" }).jpeg({ quality: 72, mozjpeg: true }).toBuffer();
+      if (output.length <= 80 * 1024) return "data:image/jpeg;base64," + output.toString("base64");
       width = Math.floor(width * 0.75);
     }
   } catch { /* Invalid images must not replace the saved image. */ }
