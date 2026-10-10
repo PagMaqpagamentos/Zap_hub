@@ -157,7 +157,7 @@ test("modo real gera link em centavos e envia uma só vez mesmo com chamadas con
   assert.equal(calls.length, 2);
   assert.equal(calls[0].body.items[0].price, 14990);
   assert.equal(calls[1].headers.token, "segredo");
-  assert.match(calls[1].body.text, /https:\/\/hub\.example\.com\/p\/[a-f0-9]{32}/);
+  assert.match(calls[1].body.choices[0], /https:\/\/hub\.example\.com\/p\/[a-f0-9]{32}/);
   assert.equal(s.deliveries()[0].status, "sent");
 });
 test("resposta incerta da Uazapi não provoca reenvio automático", async (t) => {
@@ -361,7 +361,7 @@ test("teste separado envia WhatsApp real uma vez em simulação e não altera fa
   const before=JSON.stringify(s.invoices());
   const result=await b.integrationTest(input);await b.integrationTest(input);
   assert.equal(result.whatsappStatus,"sent");assert.equal(calls.length,2);assert.equal(calls[0].body.items[0].price,100);
-  assert.equal(calls[1].body.linkPreview,false);assert.ok(calls[1].body.text.includes("Referência:"));assert.equal(calls[1].body.number,input.phone);assert.ok(calls[1].body.text.includes(result.messageLink));
+  assert.equal(calls[1].url.endsWith("/send/menu"),true); assert.equal(calls[1].body.type,"button");assert.ok(calls[1].body.text.includes("Referência:"));assert.equal(calls[1].body.number,input.phone);assert.ok(!calls[1].body.text.includes(result.messageLink)); assert.equal(calls[1].body.choices[0], "💳 Pagar fatura|" + result.messageLink);
   await b.confirm({order_nsu:result.orderId,transaction_nsu:"teste",slug:"s"});await b.confirm({order_nsu:result.orderId,transaction_nsu:"teste",slug:"s"});
   assert.equal(s.get("integrationTests",input.id).status,"paid");assert.equal(s.all("testPayments").length,1);
   assert.equal(JSON.stringify(s.invoices()),before);assert.equal(s.all("payments").length,0);assert.equal(s.settings().mode,"simulation");
@@ -393,3 +393,20 @@ test("excluir cobrança remove futuras sem recebimentos e preserva histórico",t
  assert.equal(s.invoices().length,2);assert.equal(s.get("clients",c.id).active,true);assert.equal(s.get("plans",p.id).active,false);
  assert.ok(s.get("plans",p.id).deletedAt);assert.equal(s.generate("2026-12-01"),0);assert.equal(s.deletePlan(p.id,"2026-10-10"),null);
 });
+
+ test("imagem acompanha botão e modo link continua disponível", async t => {
+   const {s} = fixture(t);
+   const image = "data:image/png;base64,iVBORw0KGgo=";
+   s.put("settings", "main", {...s.settings(),handle:"loja",publicUrl:"https://hub.example.com",uazapiUrl:"https://wa.example.com",uazapiToken:s.seal("secret"),billingImage:image});
+   const calls=[];
+   const b=createBilling(s, async (url,body)=>{calls.push({url,body}); return url.endsWith("/links") ? {url:"https://checkout.infinitepay.io/example"} : {id:"sent"};});
+   await b.integrationTest({id:randomUUID(),kind:"standalone",amount:100,phone:"5511999999999",sendWhatsapp:true});
+   assert.equal(calls[1].body.file,image);
+   assert.equal(calls[1].body.mimetype,"image");
+   assert.ok(!calls[1].body.text.includes("https://"));
+   s.put("settings","main",{...s.settings(),paymentPresentation:"link"});
+   await b.integrationTest({id:randomUUID(),kind:"standalone",amount:100,phone:"5511999999999",sendWhatsapp:true});
+   assert.ok(calls[3].url.endsWith("/send/text"));
+   assert.equal(calls[3].body.linkPreview,false);
+   assert.ok(calls[3].body.text.includes("https://hub.example.com/p/"));
+ });

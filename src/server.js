@@ -47,7 +47,7 @@ export function createApp(
     store.db.prepare("SELECT 1").get();
     res.json({ status: "ok" });
   });
-  app.use(express.json({ limit: "64kb" }));
+  app.use(express.json({ limit: "3mb" }));
   app.use((req, res, next) => {
     res.set({
       "X-Content-Type-Options": "nosniff",
@@ -277,6 +277,16 @@ export function createApp(
           .max(100)
           .regex(/^[\w.-]*$/, "InfiniteTag inválida (sem $)"),
         publicUrl: httpsUrl,
+        paymentPresentation: z.enum(["button", "link"]).optional(),
+        billingImage: z.string().max(2800000).refine(value => {
+          if (!value) return true;
+          const match = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+          if (!match) return false;
+          const bytes = Buffer.from(match[2], "base64");
+          return bytes.length <= 2 * 1024 * 1024 && (match[1] === "png"
+            ? bytes.subarray(0,8).toString("hex") === "89504e470d0a1a0a"
+            : bytes.subarray(0,3).toString("hex") === "ffd8ff");
+        }, "Envie uma imagem PNG ou JPEG de até 2 MB").optional(),
       })
       .parse(req.body);
     const current = store.settings();
